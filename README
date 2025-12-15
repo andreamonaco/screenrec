@@ -1,18 +1,20 @@
 __What is screenrec?__
 
-screenrec is a little utility to take a screenshot of your desktop screen and in
-the future also record a video of it.  Contrary to other popular programs, it
-reads directly from the framebuffer of your Linux kernel DRM subsystem,
-bypassing the X server or Wayland, so in theory it may achieve better
-performance.  Other programs have attempted this strategy, for example ffmpeg
-with the kmsgrab device, and there were some attempts to include this feature in
-OBS.
+screenrec is a little utility to take a screenshot of your desktop screen and
+record a video of it.  Contrary to other popular programs, it reads directly
+from the framebuffer of your Linux kernel DRM subsystem, bypassing the X server
+or Wayland, so in theory it may achieve better performance.  Other programs have
+attempted this strategy, for example ffmpeg with the kmsgrab device, and there
+were some attempts to include this feature in OBS.
 
 
 
 __How do I use it?__
 
-You can build the program with a simple 'make'; the only dependency is libdrm.
+You can build the program with a simple 'make'; screenrec depends on libdrm for
+querying DRM setup and on libx264 for video encoding; if you use a distribution
+with packages, you probably need the 'dev' version of these libraries for
+building.
 
 To take a screenshot of your screen, run
 
@@ -21,16 +23,25 @@ To take a screenshot of your screen, run
 screenrec will take a screenshot and output the result to standard output in
 binary PPM format so you can redirect it as in the example.  For this
 proof-of-concept I use PPM which is a very basic format that has decent support
-in popular programs.  Note that screenrec needs root privilege or at least the
-correct capabilities to access the framebuffer.
+in popular programs.
+
+To record your screen without audio for 15 seconds, use
+
+ $ screenrec -r > output.mkv
+
+screenrec will use the Matroska container and H.264 codec.
+
+Note that in both cases screenrec needs root privilege or at least the correct
+capabilities to access the framebuffer.
 
 screenrec will query the first plane of the first framebuffer of the first crtc
 of the first video card. This will be the right choice in many cases.  The
 cursor will not be recorded, since it is usually put in a different plane.
 
-At present screenrec is a test for my system and so it supports either a
-4kb-tiled framebuffer or a linear one and the pixel format XR24, but this is
-easy to expand.
+At present screenrec is a test for my system and so for screenshots it supports
+either a 4kb-tiled framebuffer or a linear one and the pixel format XR24, while
+for recording it only supports 4kb-tiled order and XR24 format; these limitation
+are easy to expand.
 
 You can run "screenrec -d" to dump info about your DRM setup so you can check
 those assumptions.  Look at the pixel_format and modifier fields and compare
