@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -28,6 +29,8 @@
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+
+#include <x264.h>
 
 
 
@@ -47,6 +50,15 @@ pixel_order  /* pixel orders supported by this utility */
   {
     LINEAR,
     TILEDX_4KB
+  };
+
+
+enum
+action
+  {
+    DUMP_INFO,
+    SCREENSHOT,
+    RECORD
   };
 
 
@@ -292,7 +304,7 @@ dump_linear_pixels (char *buf, int w, int h, int p, enum pixel_format pf)
 
 
 void
-dump_tiledx4kb_pixels (char *buf, int w, int h, int p, enum pixel_format pf)
+dump_tiledx4kb_pixels_linearly (char *buf, int w, int h, int p, enum pixel_format pf)
 {
   char *out = malloc_and_check (w*h*3);
   int i, x, y, srcind, destind;
@@ -315,49 +327,13 @@ dump_tiledx4kb_pixels (char *buf, int w, int h, int p, enum pixel_format pf)
 }
 
 
-void
-print_help_and_exit (void)
-{
-  printf ("options:\n"
-	  "\t--take-screenshot or -s:   take a screenshot and print "
-	  "the binary data to stdout in binary PPM format\n"
-	  "\t--dump-info or -d:         dump info about your DRM setup\n");
-  exit (0);
-}
-
-
 int
-main (int argc, char *argv [])
+open_framebuffer (drmModeFB2 **fb2)
 {
   drmDevice **devs;
   drmModeRes *res;
   drmModeCrtc *crtc;
-  drmModeFB2 *fb2;
-  struct stat statbuf;
-  enum pixel_format pf;
-  enum pixel_order po;
-  int devsnum, fd, dmabuf_fd, i, take_screenshot = 0, pixel_format;
-  long mod;
-  char *buf;
-
-
-  for (i = 1; i < argc; i++)
-    {
-      if (!strcmp (argv [i], "--take-screenshot")
-	  || !strcmp (argv [i], "-s"))
-	take_screenshot = 1;
-      else if (!strcmp (argv [i], "--dump-info")
-	       || !strcmp (argv [i], "-d"))
-	take_screenshot = 0;
-      else
-	{
-	  fprintf (stderr, "option '%s' not recognized\n", argv [i]);
-	  print_help_and_exit ();
-	}
-    }
-
-  if (!take_screenshot)
-    dump_drm_info_and_exit ();
+  int devsnum, fd, dmabuf_fd;
 
   devs = get_devices (&devsnum);
 
@@ -386,23 +362,45 @@ main (int argc, char *argv [])
       exit (1);
     }
 
-  fb2 = drmModeGetFB2 (fd, crtc->buffer_id);
+  *fb2 = drmModeGetFB2 (fd, crtc->buffer_id);
 
-  if (!fb2)
+  if (!*fb2)
     {
       fprintf (stderr, "could not inspect framebuffer\n");
       exit (1);
     }
 
-  if (drmPrimeHandleToFD (fd, fb2->handles [0], 0, &dmabuf_fd))
+  if (drmPrimeHandleToFD (fd, (*fb2)->handles [0], 0, &dmabuf_fd))
     {
-      fprintf (stderr, "couldn't get file descriptor for this framebuffer, "
-	      "maybe you lack permissions?\n");
+      fprintf (stderr, "couldn't get file descriptor for framebuffer, "
+	       "maybe you lack permissions?\n");
       exit (1);
     }
 
+  drmModeFreeCrtc (crtc);
+  drmModeFreeResources (res);
+  close (fd);
+
   fprintf (stderr, "selecting first plane of first framebuffer of first crtc of "
 	   "first video card...\n");
+
+  return dmabuf_fd;
+}
+
+
+void
+take_screenshot_and_exit (void)
+{
+  drmModeFB2 *fb2;
+  struct stat statbuf;
+  enum pixel_format pf;
+  enum pixel_order po;
+  long mod;
+  char *buf;
+  int dmabuf_fd, pixel_format;
+
+
+  dmabuf_fd = open_framebuffer (&fb2);
 
 
   pixel_format = fb2->pixel_format;
@@ -452,9 +450,361 @@ main (int argc, char *argv [])
       dump_linear_pixels (buf, fb2->width, fb2->height, fb2->pitches [0], pf);
       break;
     case TILEDX_4KB:
-      dump_tiledx4kb_pixels (buf, fb2->width, fb2->height, fb2->pitches [0], pf);
+      dump_tiledx4kb_pixels_linearly (buf, fb2->width, fb2->height,
+				      fb2->pitches [0], pf);
       break;
     }
 
-  return 0;
+  exit (0);
+}
+
+
+void
+convert_tiledx4kb_pixels_for_x264 (unsigned char *out, char *in, int w, int h,
+				   int p, enum pixel_format pf)
+{
+  int x, y, srcind, destind;
+
+  for (x = 0; x < w; x++)
+    {
+      for (y = 0; y < h; y++)
+	{
+	  destind = y*w*3+x*3;
+	  srcind = y/8*4096*(p/512)+x/128*4096+(y%8)*512+(x%128)*4;
+
+	  out [destind] = in [srcind+2];
+	  out [destind+1] = in [srcind+1];
+	  out [destind+2] = in [srcind];
+	}
+    }
+}
+
+
+void
+print_minimal_matroska_header (int width, int height, x264_nal_t headers [],
+			       int headers_num)
+{
+  x264_nal_t *sps = NULL, *pps = NULL;
+  int i, j, header_sz, avcrec_sz;
+  unsigned char header_start []
+    = {0x1a, 0x45, 0xdf, 0xa3, 0xa3, /* ebml header */
+       0x42, 0x86, 0x81, 0x01,
+       0x42, 0xf7, 0x81, 0x01,
+       0x42, 0xf2, 0x81, 0x04,
+       0x42, 0xf3, 0x81, 0x08,
+       0x42, 0x82, 0x88, 'm', 'a', 't', 'r', 'o', 's', 'k', 'a',
+       0x42, 0x87, 0x81, 0x04,
+       0x42, 0x85, 0x81, 0x02,
+
+       0x18, 0x53, 0x80, 0x67, 0xff, /* segment */
+
+       0x16, 0x54, 0xae, 0x6b, 0x00, /* all video tracks */
+       0xae, 0x00, /* track entry */
+       0xd7, 0x81, 0x1, /* track number */
+       0x73, 0xc5, 0x81, 0x1, /* track uid */
+       0x83, 0x81, 0x1, /* track type */
+       0xe0, 0x88, /* video settings */
+       0xb0, 0x82, 0x00, 0x00, 0xba, 0x82, 0x00, 0x00, /* pixel width and height */
+       0x86, 0x8f, 'V', '_', 'M', 'P', 'E', 'G', '4', '/' , 'I', 'S', 'O',
+       '/', 'A', 'V', 'C', /* codec id */
+       0x63, 0xa2, 0x00, /* codec private */
+       /* beginning of AVCDecoderConfigurationRecord */
+       0x01, 0x42, 0xc0, 0x1f,
+       0xff};
+  unsigned char other_headers []
+    = {0x15, 0x49, 0xa9, 0x66, 0x87, /* info header */
+       0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40, /* timestamp scale */
+       0x1f, 0x43, 0xb6, 0x75, 0xff, /* cluster header */
+       0xe7, 0x81, 0x00, /* timestamp */ };
+  unsigned char *header;
+
+
+  for (i = 0; i < headers_num; i++)
+    {
+      switch (headers [i].i_type)
+	{
+	case NAL_SPS:
+	  sps = &headers [i];
+	  break;
+	case NAL_PPS:
+	  pps = &headers [i];
+	  break;
+	}
+    }
+
+  if (!sps || !pps)
+    {
+      fprintf (stderr, "couldn't configure x264 encoder\n");
+      exit (1);
+    }
+
+  header_sz = sizeof (header_start) / sizeof (header_start [0])
+    +3+sps->i_payload+3+pps->i_payload+sizeof (other_headers)
+    / sizeof (other_headers [0]);
+  header = malloc_and_check (header_sz);
+
+  for (i = 0; i < sizeof (header_start) / sizeof (header_start [0]); i++)
+    {
+      header [i] = header_start [i];
+    }
+
+  header [i++] = 0xe1;
+  header [i++] = (sps->i_payload >> 8) & 0xff;
+  header [i++] = sps->i_payload & 0xff;
+  memcpy (header+i, sps->p_payload, sps->i_payload);
+  i += sps->i_payload;
+
+  header [i++] = 0x01;
+  header [i++] = (pps->i_payload >> 8) & 0xff;
+  header [i++] = pps->i_payload & 0xff;
+  memcpy (header+i, pps->p_payload, pps->i_payload);
+  i += pps->i_payload;
+
+  avcrec_sz = 8+sps->i_payload+3+pps->i_payload;
+
+  if (avcrec_sz > 126)
+    {
+      fprintf (stderr, "avcrec_sz too big\n");
+      exit (1);
+    }
+
+  header [91] = 0x80 | avcrec_sz;
+
+  header [66] = (width & 0xff00) >> 8;
+  header [67] = width & 0xff;
+  header [70] = (height & 0xff00) >> 8;
+  header [71] = height & 0xff;
+
+  if (avcrec_sz+40 > 126)
+    {
+      fprintf (stderr, "track entry too big\n");
+      exit (1);
+    }
+
+  header [51] = 0x80 | (avcrec_sz+40);
+
+  if (avcrec_sz+42 > 126)
+    {
+      fprintf (stderr, "tracks too big\n");
+      exit (1);
+    }
+
+  header [49] = 0x80 | (avcrec_sz+42);
+
+  for (j = 0; j < sizeof (other_headers) / sizeof (other_headers [0]); j++)
+    {
+      header [i++] = other_headers [j];
+    }
+
+  for (i = 0; i < header_sz; i++)
+    putchar (header [i]);
+}
+
+
+void
+record_screen_and_exit (void)
+{
+  x264_param_t par;
+  x264_picture_t inframe, outframe;
+  x264_nal_t *nal, *headers;
+  x264_t *enc;
+  drmModeFB2 *fb2;
+  struct stat statbuf;
+  struct timespec ts, latest_ts = {0};
+  char *buf;
+  unsigned char *out;
+  int w, h, dmabuf_fd, num_frames, outsz, i_nal, headers_num, timestamp;
+  long ndelta;
+
+  dmabuf_fd = open_framebuffer (&fb2);
+
+  w = fb2->width;
+  h = fb2->height;
+
+  if (x264_param_default_preset (&par, "medium", NULL) < 0)
+    {
+      fprintf (stderr, "couldn't configure x264 encoder\n");
+      exit (1);
+    }
+
+  par.i_bitdepth = 8;
+  /*par.i_csp = X264_CSP_I420;*/
+  par.i_csp = X264_CSP_RGB;
+  par.i_width = w;
+  par.i_height = h;
+  par.b_vfr_input = 0;
+  /*par.b_repeat_headers = 1;*/
+  par.b_annexb = 1;
+
+  if (x264_param_apply_profile (&par, "high444") < 0)
+    {
+      fprintf (stderr, "couldn't configure x264 encoder\n");
+      exit (1);
+    }
+
+  if (x264_picture_alloc (&inframe, X264_CSP_RGB, w, h) < 0)
+    {
+      fprintf (stderr, "couldn't configure x264 encoder\n");
+      exit (1);
+    }
+
+  enc = x264_encoder_open (&par);
+
+  if (!enc)
+    {
+      fprintf (stderr, "couldn't configure x264 encoder\n");
+      exit (1);
+    }
+
+  if (fstat (dmabuf_fd, &statbuf) < 0)
+    {
+      fprintf (stderr, "couldn't stat dmabuf of the framebuffer\n");
+      exit (1);
+    }
+
+  buf = mmap (NULL, statbuf.st_size, PROT_READ, MAP_SHARED, dmabuf_fd,
+	      fb2->offsets [0]);
+
+  if (buf == (void *) -1)
+    {
+      fprintf (stderr, "couldn't mmap dmabuf of the framebuffer\n");
+      exit (1);
+    }
+
+  if (x264_encoder_headers (enc, &headers, &headers_num) < 0)
+    {
+      fprintf (stderr, "couldn't configure x264 encoder\n");
+      exit (1);
+    }
+
+  fprintf (stderr, "warning: assuming pixel format XR24...\n");
+  fprintf (stderr, "warning: assuming pixel order tiled X by 4 KB...\n");
+
+  print_minimal_matroska_header (w, h, headers, headers_num);
+
+
+  out = malloc_and_check (w*h*3);
+
+  if (clock_gettime (CLOCK_REALTIME, &latest_ts) < 0)
+    {
+      fprintf (stderr, "couldn't read system clock\n");
+      exit (1);
+    }
+
+  for (num_frames = 0; num_frames < 450;)
+    {
+      if (clock_gettime (CLOCK_REALTIME, &ts) < 0)
+	{
+	  fprintf (stderr, "couldn't read system clock\n");
+	  exit (1);
+	}
+
+      ndelta = (ts.tv_sec-latest_ts.tv_sec)*1000000000
+	+(ts.tv_nsec-latest_ts.tv_nsec);
+
+      if (ndelta > 33333333)
+	{
+	  if (ndelta > 33333333*2)
+	    fprintf (stderr, "warning: at least a frame was skipped\n");
+
+	  latest_ts = ts;
+
+	  convert_tiledx4kb_pixels_for_x264 (out, buf, w, h, fb2->pitches [0], 0);
+
+	  inframe.img.plane [0] = out;
+	  inframe.i_pts = num_frames;
+
+	  outsz = x264_encoder_encode (enc, &nal, &i_nal, &inframe, &outframe);
+
+	  if (outsz < 0)
+	    {
+	      fprintf (stderr, "couldn't encode framebuffer content\n");
+	      exit (1);
+	    }
+	  else if (outsz)
+	    {
+	      if (outsz+4 > 1048575)
+		fprintf (stderr, "skipping this frame because size (%d) is too "
+			 "big\n", outsz);
+	      else
+		{
+		  putchar (0xa3);
+		  putchar (0x20 | (((outsz+4) >> 16) & 0xff));
+		  putchar (((outsz+4) >> 8) & 0xff);
+		  putchar ((outsz+4) & 0xff);
+
+		  timestamp = num_frames*33;
+
+		  putchar (0x81);
+		  putchar ((timestamp>>8) & 0xff);
+		  putchar (timestamp & 0xff);
+		  putchar (0);
+
+		  if (!fwrite (nal->p_payload, outsz, 1, stdout))
+		    {
+		      fprintf (stderr, "couldn't encode framebuffer content\n");
+		      exit (1);
+		    }
+		}
+	    }
+
+	  num_frames++;
+	}
+    }
+
+  exit (0);
+}
+
+
+void
+print_help_and_exit (void)
+{
+  printf ("options:\n"
+	  "\t--record-screen or -r:     record screen and print the binary data "
+	  "to stdout in MKV format\n"
+	  "\t--take-screenshot or -s:   take a screenshot and print "
+	  "the data to stdout in binary PPM format\n"
+	  "\t--dump-info or -d:         dump info about your DRM setup\n"
+	  "\t--help or -h:              print this help and exit\n");
+  exit (0);
+}
+
+
+int
+main (int argc, char *argv [])
+{
+  enum action act = DUMP_INFO;
+  int i;
+
+
+  for (i = 1; i < argc; i++)
+    {
+      if (!strcmp (argv [i], "--record-screen")
+	  || !strcmp (argv [i], "-r"))
+	act = RECORD;
+      else if (!strcmp (argv [i], "--take-screenshot")
+	  || !strcmp (argv [i], "-s"))
+	act = SCREENSHOT;
+      else if (!strcmp (argv [i], "--dump-info")
+	       || !strcmp (argv [i], "-d"))
+	act = DUMP_INFO;
+      else if (!strcmp (argv [i], "--help")
+	       || !strcmp (argv [i], "-h"))
+	print_help_and_exit ();
+      else
+	{
+	  fprintf (stderr, "option '%s' not recognized\n", argv [i]);
+	  print_help_and_exit ();
+	}
+    }
+
+  if (act == DUMP_INFO)
+    dump_drm_info_and_exit ();
+
+  if (act == SCREENSHOT)
+    take_screenshot_and_exit ();
+
+  if (act == RECORD)
+    record_screen_and_exit ();
+
 }

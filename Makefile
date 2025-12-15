@@ -19,8 +19,8 @@
 
 
 CC = gcc
-CFLAGS = -I/usr/include/libdrm
-LIBS = -ldrm
+CFLAGS = -I/usr/include/libdrm -Wall
+LIBS = -ldrm -lx264
 
 
 screenrec: main.o
