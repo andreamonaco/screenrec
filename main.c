@@ -602,7 +602,7 @@ print_minimal_matroska_header (int width, int height, x264_nal_t headers [],
 
 
 void
-record_screen_and_exit (void)
+record_screen_and_exit (char *preset)
 {
   x264_param_t par;
   x264_picture_t inframe, outframe;
@@ -621,7 +621,7 @@ record_screen_and_exit (void)
   w = fb2->width;
   h = fb2->height;
 
-  if (x264_param_default_preset (&par, "medium", NULL) < 0)
+  if (x264_param_default_preset (&par, preset, NULL) < 0)
     {
       fprintf (stderr, "couldn't configure x264 encoder\n");
       exit (1);
@@ -762,6 +762,8 @@ print_help_and_exit (void)
   printf ("options:\n"
 	  "\t--record-screen or -r:     record screen and print the binary data "
 	  "to stdout in MKV format\n"
+	  "\t--preset or -p PRESET:     select a preset when recording screen, "
+	  "default is medium\n"
 	  "\t--take-screenshot or -s:   take a screenshot and print "
 	  "the data to stdout in binary PPM format\n"
 	  "\t--dump-info or -d:         dump info about your DRM setup\n"
@@ -774,14 +776,22 @@ int
 main (int argc, char *argv [])
 {
   enum action act = DUMP_INFO;
-  int i;
+  char *preset = "medium";
+  int i, need_arg = 0;
 
 
   for (i = 1; i < argc; i++)
     {
-      if (!strcmp (argv [i], "--record-screen")
-	  || !strcmp (argv [i], "-r"))
+      if (need_arg)
+	{
+	  preset = argv [i];
+	  need_arg = 0;
+	}
+      else if (!strcmp (argv [i], "--record-screen")
+	       || !strcmp (argv [i], "-r"))
 	act = RECORD;
+      else if (!strcmp (argv [i], "--preset") || !strcmp (argv [i], "-p"))
+	need_arg = 1;
       else if (!strcmp (argv [i], "--take-screenshot")
 	  || !strcmp (argv [i], "-s"))
 	act = SCREENSHOT;
@@ -798,6 +808,12 @@ main (int argc, char *argv [])
 	}
     }
 
+  if (need_arg)
+    {
+      fprintf (stderr, "option '-p' requires an argument\n");
+      print_help_and_exit ();
+    }
+
   if (act == DUMP_INFO)
     dump_drm_info_and_exit ();
 
@@ -805,6 +821,7 @@ main (int argc, char *argv [])
     take_screenshot_and_exit ();
 
   if (act == RECORD)
-    record_screen_and_exit ();
+    record_screen_and_exit (preset);
 
+  return 0;
 }
