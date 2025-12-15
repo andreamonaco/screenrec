@@ -25,11 +25,12 @@ binary PPM format so you can redirect it as in the example.  For this
 proof-of-concept I use PPM which is a very basic format that has decent support
 in popular programs.
 
-To record your screen without audio for 15 seconds, use
+To record your screen without audio, use
 
  $ screenrec -r > output.mkv
 
-screenrec will use the Matroska container and H.264 codec.
+screenrec will use the Matroska container and H.264 codec.  Press ENTER to stop
+recording.
 
 Note that in both cases screenrec needs root privilege or at least the correct
 capabilities to access the framebuffer.
