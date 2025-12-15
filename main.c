@@ -24,6 +24,7 @@
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 
@@ -610,6 +611,7 @@ record_screen_and_exit (char *preset)
   x264_t *enc;
   drmModeFB2 *fb2;
   struct stat statbuf;
+  struct pollfd pfd = {0, POLLIN};
   struct timespec ts, latest_ts = {0};
   char *buf;
   unsigned char *out;
@@ -678,7 +680,9 @@ record_screen_and_exit (char *preset)
     }
 
   fprintf (stderr, "warning: assuming pixel format XR24...\n");
-  fprintf (stderr, "warning: assuming pixel order tiled X by 4 KB...\n");
+  fprintf (stderr, "warning: assuming pixel order tiled X by 4 KB...\n\n");
+
+  fprintf (stderr, "press ENTER to stop recording\n\n");
 
   print_minimal_matroska_header (w, h, headers, headers_num);
 
@@ -691,8 +695,17 @@ record_screen_and_exit (char *preset)
       exit (1);
     }
 
-  for (num_frames = 0; num_frames < 450;)
+  for (num_frames = 0; ;)
     {
+      if (poll (&pfd, 1, 0) < 0)
+	{
+	  fprintf (stderr, "couldn't poll standard input\n");
+	  exit (1);
+	}
+
+      if (pfd.revents & POLLIN)
+	break;
+
       if (clock_gettime (CLOCK_REALTIME, &ts) < 0)
 	{
 	  fprintf (stderr, "couldn't read system clock\n");
@@ -752,6 +765,7 @@ record_screen_and_exit (char *preset)
 	}
     }
 
+  fprintf (stderr, "finishing...\n");
   exit (0);
 }
 
