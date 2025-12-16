@@ -487,8 +487,21 @@ convert_tiledx4kb_pixels_for_x264 (unsigned char *out, char *in, int w, int h,
 
 
 void
-print_minimal_matroska_header (int width, int height, x264_nal_t headers [],
-			       int headers_num)
+write_char (int fd, int ch)
+{
+  unsigned char c = ch & 0xff;
+
+  if (write (fd, &c, 1) != 1)
+    {
+      fprintf (stderr, "couldn't write to output file: ");
+      perror ("");
+    }
+}
+
+
+void
+write_minimal_matroska_header (int outfd, int width, int height,
+			       x264_nal_t headers [], int headers_num)
 {
   x264_nal_t *sps = NULL, *pps = NULL;
   int i, j, header_sz, avcrec_sz;
@@ -519,9 +532,7 @@ print_minimal_matroska_header (int width, int height, x264_nal_t headers [],
        0xff};
   unsigned char other_headers []
     = {0x15, 0x49, 0xa9, 0x66, 0x87, /* info header */
-       0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40, /* timestamp scale */
-       0x1f, 0x43, 0xb6, 0x75, 0xff, /* cluster header */
-       0xe7, 0x81, 0x00, /* timestamp */ };
+       0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40, /* timestamp scale */};
   unsigned char *header;
 
 
@@ -602,13 +613,41 @@ print_minimal_matroska_header (int width, int height, x264_nal_t headers [],
       header [i++] = other_headers [j];
     }
 
+  if (lseek (outfd, 0, SEEK_SET) < 0)
+    {
+      fprintf (stderr, "couldn't seek in output file\n");
+      exit (1);
+    }
+
   for (i = 0; i < header_sz; i++)
-    putchar (header [i]);
+    {
+      write_char (outfd, header [i]);
+    }
 }
 
 
 void
-record_screen_and_exit (char *preset)
+write_cluster_header (int outfd, int timestamp)
+{
+  int i;
+  unsigned char cluster_header [] =
+    {0x1f, 0x43, 0xb6, 0x75, 0xff, 0xff, 0xff, 0xff, /* cluster header */
+     0xe7, 0x84 /* timestamp */ };
+
+  for (i = 0; i < sizeof (cluster_header); i++)
+    {
+      write_char (outfd, cluster_header [i]);
+    }
+
+  write_char (outfd, (timestamp & 0xff000000) >> 24);
+  write_char (outfd, (timestamp & 0xff0000) >> 16);
+  write_char (outfd, (timestamp & 0xff00) >> 8);
+  write_char (outfd, timestamp & 0xff);
+}
+
+
+void
+record_screen_and_exit (char *output, char *preset)
 {
   x264_param_t par;
   x264_picture_t inframe, outframe;
@@ -618,9 +657,11 @@ record_screen_and_exit (char *preset)
   struct stat statbuf;
   struct pollfd pfd = {0, POLLIN};
   struct timespec ts, latest_ts = {0};
+  off_t off;
   char *buf;
   unsigned char *out;
-  int w, h, dmabuf_fd, num_frames, outsz, i_nal, headers_num, timestamp;
+  int w, h, outfd, dmabuf_fd, num_frames_within_cluster, outsz, i_nal, headers_num,
+    timestamp_of_cluster, timestamp_within_cluster, cluster_size;
   long ndelta;
 
   dmabuf_fd = open_framebuffer (&fb2);
@@ -689,8 +730,21 @@ record_screen_and_exit (char *preset)
 
   fprintf (stderr, "press ENTER to stop recording\n\n");
 
-  print_minimal_matroska_header (w, h, headers, headers_num);
+  outfd = open (output, O_RDWR);
 
+  if (outfd < 0)
+    {
+      fprintf (stderr, "couldn't open %s: ", output);
+      perror ("");
+    }
+
+  write_minimal_matroska_header (outfd, w, h, headers, headers_num);
+
+  timestamp_of_cluster = 0;
+  write_cluster_header (outfd, timestamp_of_cluster);
+  num_frames_within_cluster = 0;
+  timestamp_within_cluster = 0;
+  cluster_size = 6;
 
   out = malloc_and_check (w*h*3);
 
@@ -700,7 +754,7 @@ record_screen_and_exit (char *preset)
       exit (1);
     }
 
-  for (num_frames = 0; ;)
+  for (;;)
     {
       if (poll (&pfd, 1, 0) < 0)
 	{
@@ -730,7 +784,7 @@ record_screen_and_exit (char *preset)
 	  convert_tiledx4kb_pixels_for_x264 (out, buf, w, h, fb2->pitches [0], 0);
 
 	  inframe.img.plane [0] = out;
-	  inframe.i_pts = num_frames;
+	  inframe.i_pts = num_frames_within_cluster;
 
 	  outsz = x264_encoder_encode (enc, &nal, &i_nal, &inframe, &outframe);
 
@@ -746,31 +800,60 @@ record_screen_and_exit (char *preset)
 			 "big\n", outsz);
 	      else
 		{
-		  putchar (0xa3);
-		  putchar (0x20 | (((outsz+4) >> 16) & 0xff));
-		  putchar (((outsz+4) >> 8) & 0xff);
-		  putchar ((outsz+4) & 0xff);
+		  timestamp_within_cluster = num_frames_within_cluster*33;
 
-		  timestamp = num_frames*33;
+		  if (0x7fff < timestamp_within_cluster)
+		    {
+		      off = lseek (outfd, 0, SEEK_CUR);
 
-		  putchar (0x81);
-		  putchar ((timestamp>>8) & 0xff);
-		  putchar (timestamp & 0xff);
-		  putchar (0);
+		      lseek (outfd, -cluster_size-4, SEEK_CUR);
+		      write_char (outfd, 0x10 | ((cluster_size >> 24) & 0xff));
+		      write_char (outfd, (cluster_size >> 16) & 0xff);
+		      write_char (outfd, (cluster_size >> 8) & 0xff);
+		      write_char (outfd, cluster_size & 0xff);
 
-		  if (!fwrite (nal->p_payload, outsz, 1, stdout))
+		      lseek (outfd, off, SEEK_SET);
+		      timestamp_of_cluster += timestamp_within_cluster;
+		      write_cluster_header (outfd, timestamp_of_cluster);
+		      num_frames_within_cluster = 0;
+		      timestamp_within_cluster = 0;
+		      cluster_size = 6;
+		    }
+
+		  write_char (outfd, 0xa3);
+		  write_char (outfd, 0x20 | (((outsz+4) >> 16) & 0xff));
+		  write_char (outfd, ((outsz+4) >> 8) & 0xff);
+		  write_char (outfd, (outsz+4) & 0xff);
+
+		  /*fprintf (stderr, "timestamp = %d\n", timestamp);*/
+
+		  write_char (outfd, 0x81);
+		  write_char (outfd, ((timestamp_within_cluster>>8) & 0xff));
+		  write_char (outfd, timestamp_within_cluster & 0xff);
+		  write_char (outfd, 0);
+
+		  if (write (outfd, nal->p_payload, outsz) != outsz)
 		    {
 		      fprintf (stderr, "couldn't encode framebuffer content\n");
 		      exit (1);
 		    }
+
+		  cluster_size += outsz + 8;
 		}
 	    }
 
-	  num_frames++;
+	  num_frames_within_cluster++;
 	}
     }
 
   fprintf (stderr, "finishing...\n");
+
+  lseek (outfd, -cluster_size-4, SEEK_CUR);
+  write_char (outfd, 0x10 | ((cluster_size >> 24) & 0xff));
+  write_char (outfd, (cluster_size >> 16) & 0xff);
+  write_char (outfd, (cluster_size >> 8) & 0xff);
+  write_char (outfd, cluster_size & 0xff);
+
   exit (0);
 }
 
@@ -783,6 +866,7 @@ print_help_and_exit (void)
 	  "to stdout in MKV format\n"
 	  "\t--preset or -p PRESET:     select a preset when recording screen, "
 	  "default is medium\n"
+	  "\t--output or -o FILE:       output file, required for recording\n"
 	  "\t--take-screenshot or -s:   take a screenshot and print "
 	  "the data to stdout in binary PPM format\n"
 	  "\t--dump-info or -d:         dump info about your DRM setup\n"
@@ -795,7 +879,7 @@ int
 main (int argc, char *argv [])
 {
   enum action act = DUMP_INFO;
-  char *preset = "medium";
+  char *preset = "medium", *output = NULL;
   int i, need_arg = 0;
 
 
@@ -803,14 +887,25 @@ main (int argc, char *argv [])
     {
       if (need_arg)
 	{
-	  preset = argv [i];
+	  switch (need_arg)
+	    {
+	    case 'p':
+	      preset = argv [i];
+	      break;
+	    case 'o':
+	      output = argv [i];
+	      break;
+	    }
+
 	  need_arg = 0;
 	}
       else if (!strcmp (argv [i], "--record-screen")
 	       || !strcmp (argv [i], "-r"))
 	act = RECORD;
       else if (!strcmp (argv [i], "--preset") || !strcmp (argv [i], "-p"))
-	need_arg = 1;
+	need_arg = 'p';
+      else if (!strcmp (argv [i], "--output") || !strcmp (argv [i], "-o"))
+	need_arg = 'o';
       else if (!strcmp (argv [i], "--take-screenshot")
 	  || !strcmp (argv [i], "-s"))
 	act = SCREENSHOT;
@@ -829,7 +924,7 @@ main (int argc, char *argv [])
 
   if (need_arg)
     {
-      fprintf (stderr, "option '-p' requires an argument\n");
+      fprintf (stderr, "option '%c' requires an argument\n", need_arg);
       print_help_and_exit ();
     }
 
@@ -840,7 +935,16 @@ main (int argc, char *argv [])
     take_screenshot_and_exit ();
 
   if (act == RECORD)
-    record_screen_and_exit (preset);
+    {
+      if (!output)
+	{
+	  fprintf (stderr, "for recording, you must provide an output file with "
+		   "-o or --output\n");
+	  print_help_and_exit ();
+	}
+
+      record_screen_and_exit (output, preset);
+    }
 
   return 0;
 }
