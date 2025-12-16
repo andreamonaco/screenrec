@@ -777,7 +777,10 @@ record_screen_and_exit (char *output, char *preset)
       if (ndelta > 33333333)
 	{
 	  if (ndelta > 33333333*2)
-	    fprintf (stderr, "warning: at least a frame was skipped\n");
+	    {
+	      num_frames_within_cluster += ndelta/33333333-1;
+	      fprintf (stderr, "warning: at least a frame was skipped\n");
+	    }
 
 	  latest_ts = ts;
 
