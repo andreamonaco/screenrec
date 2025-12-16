@@ -181,6 +181,11 @@ dump_drm_info_and_exit (void)
 		  "h = %d\n", j, crtc->buffer_id, crtc->x, crtc->y, crtc->width,
 		  crtc->height);
 
+	  if (crtc->mode_valid)
+	    printf ("\tvrefresh = %d\n", crtc->mode.vrefresh);
+	  else
+	    printf ("\tmode is not valid\n");
+
 	  if (crtc->buffer_id)
 	    {
 	      fb = drmModeGetFB (fd, crtc->buffer_id);
