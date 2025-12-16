@@ -29,6 +29,9 @@ To record your screen (at 30 fps without audio), use
 
  $ screenrec -r -o output.mkv
 
+the output will be saved in the file specified by the -o option; if a file with
+that name exists, it will be overwritten.
+
 screenrec will use the Matroska container and H.264 codec.  Press ENTER to stop
 recording.
 
