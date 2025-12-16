@@ -733,7 +733,7 @@ record_screen_and_exit (char *output, char *preset)
 
   fprintf (stderr, "press ENTER to stop recording\n\n");
 
-  outfd = open (output, O_RDWR);
+  outfd = open (output, O_RDWR | O_CREAT | O_TRUNC);
 
   if (outfd < 0)
     {
