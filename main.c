@@ -491,6 +491,16 @@ write_char (int fd, int ch)
 
 
 void
+write_int32_bigend (int fd, int num)
+{
+  write_char (fd, (num >> 24) & 0xff);
+  write_char (fd, (num >> 16) & 0xff);
+  write_char (fd, (num >> 8) & 0xff);
+  write_char (fd, num & 0xff);
+}
+
+
+void
 write_minimal_matroska_header (int outfd, int width, int height,
 			       x264_nal_t headers [], int headers_num)
 {
@@ -633,10 +643,7 @@ write_cluster_header (int outfd, int timestamp)
       write_char (outfd, cluster_header [i]);
     }
 
-  write_char (outfd, (timestamp & 0xff000000) >> 24);
-  write_char (outfd, (timestamp & 0xff0000) >> 16);
-  write_char (outfd, (timestamp & 0xff00) >> 8);
-  write_char (outfd, timestamp & 0xff);
+  write_int32_bigend (outfd, timestamp);
 }
 
 
@@ -801,10 +808,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 		  off = lseek (outfd, 0, SEEK_CUR);
 
 		  lseek (outfd, -cluster_size-4, SEEK_CUR);
-		  write_char (outfd, 0x10 | ((cluster_size >> 24) & 0xff));
-		  write_char (outfd, (cluster_size >> 16) & 0xff);
-		  write_char (outfd, (cluster_size >> 8) & 0xff);
-		  write_char (outfd, cluster_size & 0xff);
+		  write_int32_bigend (outfd, 0x10000000 | cluster_size);
 
 		  lseek (outfd, off, SEEK_SET);
 		  timestamp_of_cluster += timestamp_within_cluster;
@@ -849,10 +853,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   fprintf (stderr, "finishing...\n");
 
   lseek (outfd, -cluster_size-4, SEEK_CUR);
-  write_char (outfd, 0x10 | ((cluster_size >> 24) & 0xff));
-  write_char (outfd, (cluster_size >> 16) & 0xff);
-  write_char (outfd, (cluster_size >> 8) & 0xff);
-  write_char (outfd, cluster_size & 0xff);
+  write_int32_bigend (outfd, 0x10000000 | cluster_size);
 
   exit (0);
 }
