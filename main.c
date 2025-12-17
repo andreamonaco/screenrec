@@ -310,26 +310,39 @@ dump_linear_pixels (char *buf, int w, int h, int p, enum pixel_format pf)
 
 
 void
-dump_tiledx4kb_pixels_linearly (char *buf, int w, int h, int p, enum pixel_format pf)
+convert_tiledx4kb_pixels_to_linear (unsigned char *out, char *in, int w, int h,
+				    int p, enum pixel_format pf)
 {
-  char *out = malloc_and_check (w*h*3);
-  int i, x, y, srcind, destind;
+  int destind = 0, srcind, x, y;
 
-  for (x = 0; x < w; x++)
+  for (y = 0; y < h; y++)
     {
-      for (y = 0; y < h; y++)
+      for (x = 0; x < w; x++)
 	{
-	  destind = y*w*3+x*3;
 	  srcind = y/8*4096*(p/512)+x/128*4096+(y%8)*512+(x%128)*4;
 
-	  out [destind] = buf [srcind+2];
-	  out [destind+1] = buf [srcind+1];
-	  out [destind+2] = buf [srcind];
+	  out [destind] = in [srcind+2];
+	  out [destind+1] = in [srcind+1];
+	  out [destind+2] = in [srcind];
+
+	  destind += 3;
 	}
     }
+}
+
+
+void
+dump_tiledx4kb_pixels_linearly (char *buf, int w, int h, int p, enum pixel_format pf)
+{
+  int i;
+  unsigned char *out = malloc_and_check (w*h*3);
+
+  convert_tiledx4kb_pixels_to_linear (out, buf, w, h, p, pf);
 
   for (i = 0; i < w*h*3; i++)
-      putchar (out [i]);
+    putchar (out [i]);
+
+  free (out);
 }
 
 
@@ -462,27 +475,6 @@ take_screenshot_and_exit (void)
     }
 
   exit (0);
-}
-
-
-void
-convert_tiledx4kb_pixels_for_x264 (unsigned char *out, char *in, int w, int h,
-				   int p, enum pixel_format pf)
-{
-  int x, y, srcind, destind;
-
-  for (x = 0; x < w; x++)
-    {
-      for (y = 0; y < h; y++)
-	{
-	  destind = y*w*3+x*3;
-	  srcind = y/8*4096*(p/512)+x/128*4096+(y%8)*512+(x%128)*4;
-
-	  out [destind] = in [srcind+2];
-	  out [destind+1] = in [srcind+1];
-	  out [destind+2] = in [srcind];
-	}
-    }
 }
 
 
@@ -786,8 +778,7 @@ record_screen_and_exit (char *output, char *preset)
 	    }
 
 	  latest_ts = ts;
-
-	  convert_tiledx4kb_pixels_for_x264 (out, buf, w, h, fb2->pitches [0], 0);
+	  convert_tiledx4kb_pixels_to_linear (out, buf, w, h, fb2->pitches [0], 0);
 
 	  inframe.img.plane [0] = out;
 	  inframe.i_pts = num_frames_within_cluster;
