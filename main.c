@@ -347,25 +347,25 @@ dump_tiledx4kb_pixels_linearly (char *buf, int w, int h, int p, enum pixel_forma
 
 
 int
-open_framebuffer (drmModeFB2 **fb2)
+open_framebuffer (drmModeFB2 **fb2, int *cardfd)
 {
   drmDevice **devs;
   drmModeRes *res;
   drmModeCrtc *crtc;
-  int devsnum, fd, dmabuf_fd;
+  int devsnum, dmabuf_fd;
 
   devs = get_devices (&devsnum);
 
-  fd = open (devs [0]->nodes [DRM_NODE_PRIMARY], O_RDONLY);
+  *cardfd = open (devs [0]->nodes [DRM_NODE_PRIMARY], O_RDONLY);
 
-  if (fd < 0)
+  if (*cardfd < 0)
     {
       fprintf (stderr, "couldn't open video card %d (%s)\n", 0,
 	      devs [0]->nodes [DRM_NODE_PRIMARY]);
       exit (1);
     }
 
-  res = drmModeGetResources (fd);
+  res = drmModeGetResources (*cardfd);
 
   if (!res)
     {
@@ -373,7 +373,7 @@ open_framebuffer (drmModeFB2 **fb2)
       exit (1);
     }
 
-  crtc = drmModeGetCrtc (fd, res->crtcs[0]);
+  crtc = drmModeGetCrtc (*cardfd, res->crtcs[0]);
 
   if (!crtc)
     {
@@ -381,7 +381,7 @@ open_framebuffer (drmModeFB2 **fb2)
       exit (1);
     }
 
-  *fb2 = drmModeGetFB2 (fd, crtc->buffer_id);
+  *fb2 = drmModeGetFB2 (*cardfd, crtc->buffer_id);
 
   if (!*fb2)
     {
@@ -389,7 +389,7 @@ open_framebuffer (drmModeFB2 **fb2)
       exit (1);
     }
 
-  if (drmPrimeHandleToFD (fd, (*fb2)->handles [0], 0, &dmabuf_fd))
+  if (drmPrimeHandleToFD (*cardfd, (*fb2)->handles [0], 0, &dmabuf_fd))
     {
       fprintf (stderr, "couldn't get file descriptor for framebuffer, "
 	       "maybe you lack permissions?\n");
@@ -398,7 +398,6 @@ open_framebuffer (drmModeFB2 **fb2)
 
   drmModeFreeCrtc (crtc);
   drmModeFreeResources (res);
-  close (fd);
 
   fprintf (stderr, "selecting first plane of first framebuffer of first crtc of "
 	   "first video card...\n");
@@ -416,10 +415,10 @@ take_screenshot_and_exit (void)
   enum pixel_order po;
   long mod;
   char *buf;
-  int dmabuf_fd, pixel_format;
+  int dmabuf_fd, cardfd, pixel_format;
 
 
-  dmabuf_fd = open_framebuffer (&fb2);
+  dmabuf_fd = open_framebuffer (&fb2, &cardfd);
 
 
   pixel_format = fb2->pixel_format;
@@ -649,17 +648,17 @@ record_screen_and_exit (char *output, char *preset)
   x264_nal_t *nal, *headers;
   x264_t *enc;
   drmModeFB2 *fb2;
+  drmVBlank vbl = {{DRM_VBLANK_RELATIVE, 1}};
   struct stat statbuf;
   struct pollfd pfd = {0, POLLIN};
-  struct timespec ts, latest_ts = {0};
   off_t off;
   char *buf;
   unsigned char *out;
-  int w, h, outfd, dmabuf_fd, num_frames_within_cluster, outsz, i_nal, headers_num,
-    timestamp_of_cluster, timestamp_within_cluster, cluster_size;
-  long ndelta;
+  int w, h, outfd, dmabuf_fd, cardfd, num_frames_within_cluster, outsz, i_nal,
+    headers_num, timestamp_of_cluster, timestamp_within_cluster, cluster_size,
+    last_vblank = -1;
 
-  dmabuf_fd = open_framebuffer (&fb2);
+  dmabuf_fd = open_framebuffer (&fb2, &cardfd);
 
   w = fb2->width;
   h = fb2->height;
@@ -743,14 +742,100 @@ record_screen_and_exit (char *output, char *preset)
 
   out = malloc_and_check (w*h*3);
 
-  if (clock_gettime (CLOCK_REALTIME, &latest_ts) < 0)
+  /*if (clock_gettime (CLOCK_REALTIME, &latest_ts) < 0)
     {
       fprintf (stderr, "couldn't read system clock\n");
       exit (1);
-    }
+      }*/
 
   for (;;)
     {
+      if (drmWaitVBlank (cardfd, &vbl) < 0)
+	{
+	  fprintf (stderr, "couldn't wait for vblank\n");
+	  exit (1);
+	}
+
+      if (last_vblank < 0)  /* first iteration */
+	{
+	  last_vblank = vbl.reply.sequence;
+
+	  vbl.request.type = DRM_VBLANK_ABSOLUTE;
+	}
+      else
+	{
+	  if (2 < vbl.reply.sequence - last_vblank)
+	    {
+	      fprintf (stderr, "warning: at least a frame was skipped\n");
+	    }
+
+	  num_frames_within_cluster += vbl.reply.sequence-last_vblank;
+	  last_vblank = vbl.reply.sequence;
+	}
+
+      vbl.request.sequence = vbl.reply.sequence+2;
+
+      convert_tiledx4kb_pixels_to_linear (out, buf, w, h, fb2->pitches [0], 0);
+
+      inframe.img.plane [0] = out;
+      inframe.i_pts = num_frames_within_cluster;
+
+      outsz = x264_encoder_encode (enc, &nal, &i_nal, &inframe, &outframe);
+
+      if (outsz < 0)
+	{
+	  fprintf (stderr, "couldn't encode framebuffer content\n");
+	  exit (1);
+	}
+      else if (outsz)
+	{
+	  if (outsz+4 > 1048575)
+	    fprintf (stderr, "skipping this frame because size (%d) is too "
+		     "big\n", outsz);
+	  else
+	    {
+	      timestamp_within_cluster = num_frames_within_cluster*17;
+
+	      if (0x7fff < timestamp_within_cluster)
+		{
+		  off = lseek (outfd, 0, SEEK_CUR);
+
+		  lseek (outfd, -cluster_size-4, SEEK_CUR);
+		  write_char (outfd, 0x10 | ((cluster_size >> 24) & 0xff));
+		  write_char (outfd, (cluster_size >> 16) & 0xff);
+		  write_char (outfd, (cluster_size >> 8) & 0xff);
+		  write_char (outfd, cluster_size & 0xff);
+
+		  lseek (outfd, off, SEEK_SET);
+		  timestamp_of_cluster += timestamp_within_cluster;
+		  write_cluster_header (outfd, timestamp_of_cluster);
+		  num_frames_within_cluster = 0;
+		  timestamp_within_cluster = 0;
+		  cluster_size = 6;
+		}
+
+	      write_char (outfd, 0xa3);
+	      write_char (outfd, 0x20 | (((outsz+4) >> 16) & 0xff));
+	      write_char (outfd, ((outsz+4) >> 8) & 0xff);
+	      write_char (outfd, (outsz+4) & 0xff);
+
+	      /*fprintf (stderr, "timestamp = %d\n", timestamp);*/
+
+	      write_char (outfd, 0x81);
+	      write_char (outfd, ((timestamp_within_cluster>>8) & 0xff));
+	      write_char (outfd, timestamp_within_cluster & 0xff);
+	      write_char (outfd, 0);
+
+	      if (write (outfd, nal->p_payload, outsz) != outsz)
+		{
+		  fprintf (stderr, "couldn't encode framebuffer content\n");
+		  exit (1);
+		}
+
+	      cluster_size += outsz + 8;
+	    }
+	}
+
       if (poll (&pfd, 1, 0) < 0)
 	{
 	  fprintf (stderr, "couldn't poll standard input\n");
@@ -759,88 +844,6 @@ record_screen_and_exit (char *output, char *preset)
 
       if (pfd.revents & POLLIN)
 	break;
-
-      if (clock_gettime (CLOCK_REALTIME, &ts) < 0)
-	{
-	  fprintf (stderr, "couldn't read system clock\n");
-	  exit (1);
-	}
-
-      ndelta = (ts.tv_sec-latest_ts.tv_sec)*1000000000
-	+(ts.tv_nsec-latest_ts.tv_nsec);
-
-      if (ndelta > 33333333)
-	{
-	  if (ndelta > 33333333*2)
-	    {
-	      num_frames_within_cluster += ndelta/33333333-1;
-	      fprintf (stderr, "warning: at least a frame was skipped\n");
-	    }
-
-	  latest_ts = ts;
-	  convert_tiledx4kb_pixels_to_linear (out, buf, w, h, fb2->pitches [0], 0);
-
-	  inframe.img.plane [0] = out;
-	  inframe.i_pts = num_frames_within_cluster;
-
-	  outsz = x264_encoder_encode (enc, &nal, &i_nal, &inframe, &outframe);
-
-	  if (outsz < 0)
-	    {
-	      fprintf (stderr, "couldn't encode framebuffer content\n");
-	      exit (1);
-	    }
-	  else if (outsz)
-	    {
-	      if (outsz+4 > 1048575)
-		fprintf (stderr, "skipping this frame because size (%d) is too "
-			 "big\n", outsz);
-	      else
-		{
-		  timestamp_within_cluster = num_frames_within_cluster*33;
-
-		  if (0x7fff < timestamp_within_cluster)
-		    {
-		      off = lseek (outfd, 0, SEEK_CUR);
-
-		      lseek (outfd, -cluster_size-4, SEEK_CUR);
-		      write_char (outfd, 0x10 | ((cluster_size >> 24) & 0xff));
-		      write_char (outfd, (cluster_size >> 16) & 0xff);
-		      write_char (outfd, (cluster_size >> 8) & 0xff);
-		      write_char (outfd, cluster_size & 0xff);
-
-		      lseek (outfd, off, SEEK_SET);
-		      timestamp_of_cluster += timestamp_within_cluster;
-		      write_cluster_header (outfd, timestamp_of_cluster);
-		      num_frames_within_cluster = 0;
-		      timestamp_within_cluster = 0;
-		      cluster_size = 6;
-		    }
-
-		  write_char (outfd, 0xa3);
-		  write_char (outfd, 0x20 | (((outsz+4) >> 16) & 0xff));
-		  write_char (outfd, ((outsz+4) >> 8) & 0xff);
-		  write_char (outfd, (outsz+4) & 0xff);
-
-		  /*fprintf (stderr, "timestamp = %d\n", timestamp);*/
-
-		  write_char (outfd, 0x81);
-		  write_char (outfd, ((timestamp_within_cluster>>8) & 0xff));
-		  write_char (outfd, timestamp_within_cluster & 0xff);
-		  write_char (outfd, 0);
-
-		  if (write (outfd, nal->p_payload, outsz) != outsz)
-		    {
-		      fprintf (stderr, "couldn't encode framebuffer content\n");
-		      exit (1);
-		    }
-
-		  cluster_size += outsz + 8;
-		}
-	    }
-
-	  num_frames_within_cluster++;
-	}
     }
 
   fprintf (stderr, "finishing...\n");
