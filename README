@@ -25,15 +25,16 @@ binary PPM format so you can redirect it as in the example.  For this
 proof-of-concept I use PPM which is a very basic format that has decent support
 in popular programs.
 
-To record your screen (at 30 fps without audio), use
+To record your screen (without audio), use
 
  $ screenrec -r -o output.mkv
 
 the output will be saved in the file specified by the -o option; if a file with
 that name exists, it will be overwritten.
 
-screenrec will use the Matroska container and H.264 codec.  Press ENTER to stop
-recording.
+screenrec will use the Matroska container and H.264 codec.  The recording will
+be at the native refresh rate, see the -y option to change that.  Press ENTER to
+stop recording.
 
 Note that in both cases screenrec needs root privilege or at least the correct
 capabilities to access the framebuffer.
