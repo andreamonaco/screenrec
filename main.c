@@ -641,7 +641,7 @@ write_cluster_header (int outfd, int timestamp)
 
 
 void
-record_screen_and_exit (char *output, char *preset)
+record_screen_and_exit (char *output, char *preset, int recording_interval)
 {
   x264_param_t par;
   x264_picture_t inframe, outframe;
@@ -764,7 +764,7 @@ record_screen_and_exit (char *output, char *preset)
 	}
       else
 	{
-	  if (2 < vbl.reply.sequence - last_vblank)
+	  if (recording_interval < vbl.reply.sequence - last_vblank)
 	    {
 	      fprintf (stderr, "warning: at least a frame was skipped\n");
 	    }
@@ -773,7 +773,7 @@ record_screen_and_exit (char *output, char *preset)
 	  last_vblank = vbl.reply.sequence;
 	}
 
-      vbl.request.sequence = vbl.reply.sequence+2;
+      vbl.request.sequence = vbl.reply.sequence+recording_interval;
 
       convert_tiledx4kb_pixels_to_linear (out, buf, w, h, fb2->pitches [0], 0);
 
@@ -866,6 +866,8 @@ print_help_and_exit (void)
 	  "to stdout in MKV format\n"
 	  "\t--preset or -p PRESET:     select a preset when recording screen, "
 	  "default is medium\n"
+	  "\t--record-every-th or -y N  record one frame every N, defaults to one "
+	  "for recording at native refresh rate\n"
 	  "\t--output or -o FILE:       output file, required for recording\n"
 	  "\t--take-screenshot or -s:   take a screenshot and print "
 	  "the data to stdout in binary PPM format\n"
@@ -880,7 +882,7 @@ main (int argc, char *argv [])
 {
   enum action act = DUMP_INFO;
   char *preset = "medium", *output = NULL;
-  int i, need_arg = 0;
+  int i, need_arg = 0, record_interv = 1;
 
 
   for (i = 1; i < argc; i++)
@@ -891,6 +893,15 @@ main (int argc, char *argv [])
 	    {
 	    case 'p':
 	      preset = argv [i];
+	      break;
+	    case 'y':
+	      if (strlen (argv [i]) != 1 || *argv [i] < '1' || *argv [i] > '9')
+		{
+		  fprintf (stderr, "option 'y' requires an integer argument "
+			   "between 1 and 9\n");
+		  print_help_and_exit ();
+		}
+	      record_interv = *argv [i]-'0';
 	      break;
 	    case 'o':
 	      output = argv [i];
@@ -904,6 +915,8 @@ main (int argc, char *argv [])
 	act = RECORD;
       else if (!strcmp (argv [i], "--preset") || !strcmp (argv [i], "-p"))
 	need_arg = 'p';
+      else if (!strcmp (argv [i], "--record-every-th") || !strcmp (argv [i], "-y"))
+	need_arg = 'y';
       else if (!strcmp (argv [i], "--output") || !strcmp (argv [i], "-o"))
 	need_arg = 'o';
       else if (!strcmp (argv [i], "--take-screenshot")
@@ -943,7 +956,7 @@ main (int argc, char *argv [])
 	  print_help_and_exit ();
 	}
 
-      record_screen_and_exit (output, preset);
+      record_screen_and_exit (output, preset, record_interv);
     }
 
   return 0;
