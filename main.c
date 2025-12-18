@@ -63,6 +63,24 @@ action
   };
 
 
+struct
+cue
+{
+  int timestamp;
+  int cluster_position;
+  int relative_position;
+};
+
+
+#define CUE_VECTOR_SIZE 2048
+
+struct
+cue_vector
+{
+  struct cue cues [CUE_VECTOR_SIZE];
+  struct cue_vector *next;
+};
+
 
 void *
 malloc_and_check (size_t size)
@@ -502,7 +520,8 @@ write_int32_bigend (int fd, int num)
 
 void
 write_minimal_matroska_header (int outfd, int width, int height,
-			       x264_nal_t headers [], int headers_num)
+			       x264_nal_t headers [], int headers_num,
+			       off_t *seekhead_offs)
 {
   x264_nal_t *sps = NULL, *pps = NULL;
   int i, j, header_sz, avcrec_sz;
@@ -532,7 +551,19 @@ write_minimal_matroska_header (int outfd, int width, int height,
        0x01, 0x42, 0xc0, 0x1f,
        0xff};
   unsigned char other_headers []
-    = {0x15, 0x49, 0xa9, 0x66, 0x9f, /* info header */
+    = {0x11, 0x4d, 0x9b, 0x74, 0xad, /* seek head */
+       0x4d, 0xbb, 0x8b, /* seek of tracks */
+       0x53, 0xab, 0x84, 0x16, 0x54, 0xae, 0x6b, /* seek id of tracks */
+       0x53, 0xac, 0x81, 0x00, /* seek position of tracks */
+       0x4d, 0xbb, 0x8b, /* seek of info */
+       0x53, 0xab, 0x84, 0x15, 0x49, 0xa9, 0x66, /* seek id of info */
+       0x53, 0xac, 0x81, 0x00, /* seek position of info */
+
+       0x4d, 0xbb, 0x8e, /* seek of cues */
+       0x53, 0xab, 0x84, 0x1c, 0x53, 0xbb, 0x6b, /* seek id of cues */
+       0x53, 0xac, 0x84, 0x00, 0x00, 0x00, 0x00, /* seek position of cues */
+
+       0x15, 0x49, 0xa9, 0x66, 0x9f, /* info header */
        0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40, /* timestamp scale */
        0x4d, 0x80, 0x89, 's', 'c', 'r', 'e', 'e', 'n', 'r', 'e', 'c', /* muxing app */
        0x57, 0x41, 0x89, 's', 'c', 'r', 'e', 'e', 'n', 'r', 'e', 'c', /* writing app */
@@ -583,6 +614,8 @@ write_minimal_matroska_header (int outfd, int width, int height,
 
   avcrec_sz = 8+sps->i_payload+3+pps->i_payload;
 
+  /*fprintf (stderr, "avcrec_sz is %d\n", avcrec_sz);*/
+
   if (avcrec_sz > 126)
     {
       fprintf (stderr, "avcrec_sz too big\n");
@@ -612,10 +645,14 @@ write_minimal_matroska_header (int outfd, int width, int height,
 
   header [49] = 0x80 | (avcrec_sz+42);
 
+  *seekhead_offs = i;
+
   for (j = 0; j < sizeof (other_headers) / sizeof (other_headers [0]); j++)
     {
       header [i++] = other_headers [j];
     }
+
+  header [*seekhead_offs+32] = *seekhead_offs+50-45;
 
   if (lseek (outfd, 0, SEEK_SET) < 0)
     {
@@ -656,14 +693,16 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   x264_t *enc;
   drmModeFB2 *fb2;
   drmVBlank vbl = {{DRM_VBLANK_RELATIVE, 1}};
+  struct cue_vector cue_vectors = {{{0}}}, *cuevec = &cue_vectors;
   struct stat statbuf;
   struct pollfd pfd = {0, POLLIN};
-  off_t off;
+  off_t off, seekh_off;
   char *buf;
   unsigned char *out;
-  int w, h, outfd, dmabuf_fd, cardfd, num_frames_within_cluster, outsz, i_nal,
-    headers_num, timestamp_of_cluster, timestamp_within_cluster, cluster_size,
-    last_vblank = -1;
+  int i, w, h, outfd, dmabuf_fd, cardfd, num_frames_within_cluster, outsz, i_nal,
+    headers_num, timestamp_of_cluster, timestamp_within_cluster,
+    cluster_offset_within_segment, cluster_size, last_vblank = -1, cueind = 0,
+    cues_size;
 
   dmabuf_fd = open_framebuffer (&fb2, &cardfd);
 
@@ -682,7 +721,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   par.i_width = w;
   par.i_height = h;
   par.b_vfr_input = 0;
-  /*par.b_repeat_headers = 1;*/
+  par.b_repeat_headers = 1;
   par.b_annexb = 1;
 
   if (x264_param_apply_profile (&par, "high444") < 0)
@@ -739,9 +778,10 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
       perror ("");
     }
 
-  write_minimal_matroska_header (outfd, w, h, headers, headers_num);
+  write_minimal_matroska_header (outfd, w, h, headers, headers_num, &seekh_off);
 
   timestamp_of_cluster = 0;
+  cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-45;
   write_cluster_header (outfd, timestamp_of_cluster);
   num_frames_within_cluster = 0;
   timestamp_within_cluster = 0;
@@ -812,10 +852,32 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 
 		  lseek (outfd, off, SEEK_SET);
 		  timestamp_of_cluster += timestamp_within_cluster;
+		  cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-45;
 		  write_cluster_header (outfd, timestamp_of_cluster);
 		  num_frames_within_cluster = 0;
 		  timestamp_within_cluster = 0;
 		  cluster_size = 6;
+		}
+
+	      if (nal->i_type == NAL_SPS)
+		{
+		  /*fprintf (stderr, "keyframe at %d, offset is %d\n", timestamp_of_cluster
+		    +timestamp_within_cluster, cluster_offset_within_segment);*/
+
+		  if (cueind == CUE_VECTOR_SIZE)
+		    {
+		      cuevec->next = malloc_and_check (sizeof (*cuevec->next));
+		      cuevec = cuevec->next;
+		      cuevec->next = NULL;
+		      cueind = 0;
+		    }
+
+		  cuevec->cues [cueind].timestamp = timestamp_of_cluster
+		    +timestamp_within_cluster;
+		  cuevec->cues [cueind].cluster_position
+		    = cluster_offset_within_segment;
+		  cuevec->cues [cueind].relative_position = cluster_size;
+		  cueind++;
 		}
 
 	      write_char (outfd, 0xa3);
@@ -823,7 +885,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 	      write_char (outfd, ((outsz+4) >> 8) & 0xff);
 	      write_char (outfd, (outsz+4) & 0xff);
 
-	      /*fprintf (stderr, "timestamp = %d\n", timestamp);*/
+	      /*fprintf (stderr, "timestamp = %d\n", timestamp_within_cluster);*/
 
 	      write_char (outfd, 0x81);
 	      write_char (outfd, ((timestamp_within_cluster>>8) & 0xff));
@@ -850,10 +912,57 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 	break;
     }
 
-  fprintf (stderr, "finishing...\n");
+  fprintf (stderr, "finishing and adding cues...\n");
+
+
+  off = lseek (outfd, 0, SEEK_CUR);
 
   lseek (outfd, -cluster_size-4, SEEK_CUR);
   write_int32_bigend (outfd, 0x10000000 | cluster_size);
+
+  lseek (outfd, seekh_off+46, SEEK_SET);
+  write_int32_bigend (outfd, off-45);
+
+  lseek (outfd, off, SEEK_SET);
+  write_int32_bigend (outfd, 0x1c53bb6b);
+  off = lseek (outfd, 0, SEEK_CUR);
+  write_int32_bigend (outfd, 0x00000000);
+
+  cuevec = &cue_vectors;
+
+  while (cuevec)
+    {
+      for (i = 0; i < (cuevec->next ? CUE_VECTOR_SIZE : cueind); i++)
+	{
+	  write_char (outfd, 0xbb); /* cue point */
+	  write_char (outfd, 0x97);
+
+	  write_char (outfd, 0xb3); /* cue time */
+	  write_char (outfd, 0x84);
+	  write_int32_bigend (outfd, cuevec->cues [i].timestamp);
+
+	  write_char (outfd, 0xb7); /* cue track positions */
+	  write_char (outfd, 0x8f);
+
+	  write_char (outfd, 0xf7); /* cue track */
+	  write_char (outfd, 0x81);
+	  write_char (outfd, 0x01);
+
+	  write_char (outfd, 0xf1); /* cue cluster position */
+	  write_char (outfd, 0x84);
+	  write_int32_bigend (outfd, cuevec->cues [i].cluster_position);
+
+	  write_char (outfd, 0xf0); /* cue relative position */
+	  write_char (outfd, 0x84);
+	  write_int32_bigend (outfd, cuevec->cues [i].relative_position);
+	}
+
+      cuevec = cuevec->next;
+    }
+
+  cues_size = lseek (outfd, 0, SEEK_CUR)-off-4;
+  lseek (outfd, off, SEEK_SET);
+  write_int32_bigend (outfd, 0x10000000 | cues_size);
 
   exit (0);
 }
