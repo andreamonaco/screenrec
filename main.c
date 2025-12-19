@@ -721,7 +721,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   par.i_width = w;
   par.i_height = h;
   par.b_vfr_input = 0;
-  par.b_repeat_headers = 1;
+  par.b_repeat_headers = 0;
   par.b_annexb = 1;
 
   if (x264_param_apply_profile (&par, "high444") < 0)
@@ -859,7 +859,9 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 		  cluster_size = 6;
 		}
 
-	      if (nal->i_type == NAL_SPS)
+	      /*printf ("nal type is %d\n", nal->i_type);*/
+
+	      if (nal->i_type == NAL_SLICE_IDR)
 		{
 		  /*fprintf (stderr, "keyframe at %d, offset is %d\n", timestamp_of_cluster
 		    +timestamp_within_cluster, cluster_offset_within_segment);*/
@@ -891,6 +893,14 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 	      write_char (outfd, ((timestamp_within_cluster>>8) & 0xff));
 	      write_char (outfd, timestamp_within_cluster & 0xff);
 	      write_char (outfd, 0);
+
+	      /*if (i_nal > 1)
+		{
+		  printf ("more than a nal produced\n");
+
+		  for (i = 0; i < i_nal; i++)
+		    printf ("nal type is %d\n", nal [i].i_type);
+		    }*/
 
 	      if (write (outfd, nal->p_payload, outsz) != outsz)
 		{
