@@ -518,6 +518,19 @@ write_int32_bigend (int fd, int num)
 }
 
 
+const unsigned char ebml_header [] =
+  {0x1a, 0x45, 0xdf, 0xa3, 0xa3,
+   0x42, 0x86, 0x81, 0x01,
+   0x42, 0xf7, 0x81, 0x01,
+   0x42, 0xf2, 0x81, 0x04,
+   0x42, 0xf3, 0x81, 0x08,
+   0x42, 0x82, 0x88, 'm', 'a', 't', 'r', 'o', 's', 'k', 'a',
+   0x42, 0x87, 0x81, 0x04,
+   0x42, 0x85, 0x81, 0x02};
+unsigned char segment_header [] =
+  {0x18, 0x53, 0x80, 0x67, 0x00, 0x00, 0x00, 0x00};
+
+
 void
 write_minimal_matroska_header (int outfd, int width, int height,
 			       x264_nal_t headers [], int headers_num,
@@ -525,19 +538,8 @@ write_minimal_matroska_header (int outfd, int width, int height,
 {
   x264_nal_t *sps = NULL, *pps = NULL;
   int i, j, header_sz, avcrec_sz;
-  unsigned char header_start []
-    = {0x1a, 0x45, 0xdf, 0xa3, 0xa3, /* ebml header */
-       0x42, 0x86, 0x81, 0x01,
-       0x42, 0xf7, 0x81, 0x01,
-       0x42, 0xf2, 0x81, 0x04,
-       0x42, 0xf3, 0x81, 0x08,
-       0x42, 0x82, 0x88, 'm', 'a', 't', 'r', 'o', 's', 'k', 'a',
-       0x42, 0x87, 0x81, 0x04,
-       0x42, 0x85, 0x81, 0x02,
-
-       0x18, 0x53, 0x80, 0x67, 0xff, /* segment */
-
-       0x16, 0x54, 0xae, 0x6b, 0x00, /* all video tracks */
+  unsigned char tracks_header []
+    = {0x16, 0x54, 0xae, 0x6b, 0x00, /* all video tracks */
        0xae, 0x00, /* track entry */
        0xd7, 0x81, 0x1, /* track number */
        0x73, 0xc5, 0x81, 0x1, /* track uid */
@@ -545,11 +547,11 @@ write_minimal_matroska_header (int outfd, int width, int height,
        0xe0, 0x88, /* video settings */
        0xb0, 0x82, 0x00, 0x00, 0xba, 0x82, 0x00, 0x00, /* pixel width and height */
        0x86, 0x8f, 'V', '_', 'M', 'P', 'E', 'G', '4', '/' , 'I', 'S', 'O',
-       '/', 'A', 'V', 'C', /* codec id */
-       0x63, 0xa2, 0x00, /* codec private */
-       /* beginning of AVCDecoderConfigurationRecord */
-       0x01, 0x42, 0xc0, 0x1f,
-       0xff};
+       '/', 'A', 'V', 'C', /* codec id */};
+  unsigned char codec_private_header []
+    = {0x63, 0xa2, 0x00}; /* codec private */
+  unsigned char avcrec_header []
+    = {0x01, 0x42, 0xc0, 0x1f, 0xff};
   unsigned char other_headers []
     = {0x11, 0x4d, 0x9b, 0x74, 0xad, /* seek head */
        0x4d, 0xbb, 0x8b, /* seek of tracks */
@@ -590,14 +592,35 @@ write_minimal_matroska_header (int outfd, int width, int height,
       exit (1);
     }
 
-  header_sz = sizeof (header_start) / sizeof (header_start [0])
-    +3+sps->i_payload+3+pps->i_payload+sizeof (other_headers)
-    / sizeof (other_headers [0]);
+  avcrec_sz = sizeof (avcrec_header)+3+sps->i_payload+3+pps->i_payload;
+
+  header_sz = sizeof (ebml_header)+sizeof (segment_header)+sizeof (tracks_header)
+    +sizeof (codec_private_header)+avcrec_sz+sizeof (other_headers);
   header = malloc_and_check (header_sz);
 
-  for (i = 0; i < sizeof (header_start) / sizeof (header_start [0]); i++)
+  for (i = 0; i < sizeof (ebml_header); i++)
     {
-      header [i] = header_start [i];
+      header [i] = ebml_header [i];
+    }
+
+  for (j = 0; j < sizeof (segment_header); j++)
+    {
+      header [i++] = segment_header [j];
+    }
+
+  for (j = 0; j < sizeof (tracks_header); j++)
+    {
+      header [i++] = tracks_header [j];
+    }
+
+  for (j = 0; j < sizeof (codec_private_header); j++)
+    {
+      header [i++] = codec_private_header [j];
+    }
+
+  for (j = 0; j < sizeof (avcrec_header); j++)
+    {
+      header [i++] = avcrec_header [j];
     }
 
   header [i++] = 0xe1;
@@ -612,8 +635,6 @@ write_minimal_matroska_header (int outfd, int width, int height,
   memcpy (header+i, pps->p_payload, pps->i_payload);
   i += pps->i_payload;
 
-  avcrec_sz = 8+sps->i_payload+3+pps->i_payload;
-
   /*fprintf (stderr, "avcrec_sz is %d\n", avcrec_sz);*/
 
   if (avcrec_sz > 126)
@@ -622,37 +643,41 @@ write_minimal_matroska_header (int outfd, int width, int height,
       exit (1);
     }
 
-  header [91] = 0x80 | avcrec_sz;
+  header [sizeof (ebml_header)+sizeof (segment_header)+sizeof (tracks_header)+2]
+    = 0x80 | avcrec_sz;
 
-  header [66] = (width & 0xff00) >> 8;
-  header [67] = width & 0xff;
-  header [70] = (height & 0xff00) >> 8;
-  header [71] = height & 0xff;
+  header [sizeof (ebml_header)+sizeof (segment_header)+21] = (width & 0xff00) >> 8;
+  header [sizeof (ebml_header)+sizeof (segment_header)+22] = width & 0xff;
+  header [sizeof (ebml_header)+sizeof (segment_header)+25] = (height & 0xff00) >> 8;
+  header [sizeof (ebml_header)+sizeof (segment_header)+26] = height & 0xff;
 
-  if (avcrec_sz+40 > 126)
+  if (sizeof (tracks_header)-7+sizeof (codec_private_header)+avcrec_sz > 126)
     {
       fprintf (stderr, "track entry too big\n");
       exit (1);
     }
 
-  header [51] = 0x80 | (avcrec_sz+40);
+  header [sizeof (ebml_header)+sizeof (segment_header)+6]
+    = 0x80 | (sizeof (tracks_header)-7+sizeof (codec_private_header)+avcrec_sz);
 
-  if (avcrec_sz+42 > 126)
+  if (sizeof (tracks_header)-5+sizeof (codec_private_header)+avcrec_sz > 126)
     {
       fprintf (stderr, "tracks too big\n");
       exit (1);
     }
 
-  header [49] = 0x80 | (avcrec_sz+42);
+  header [sizeof (ebml_header)+sizeof (segment_header)+4]
+    = 0x80 | (sizeof (tracks_header)-5+sizeof (codec_private_header)+avcrec_sz);
+
 
   *seekhead_offs = i;
 
-  for (j = 0; j < sizeof (other_headers) / sizeof (other_headers [0]); j++)
+  for (j = 0; j < sizeof (other_headers); j++)
     {
       header [i++] = other_headers [j];
     }
 
-  header [*seekhead_offs+32] = *seekhead_offs+50-45;
+  header [*seekhead_offs+32] = *seekhead_offs+50-48;
 
   if (lseek (outfd, 0, SEEK_SET) < 0)
     {
@@ -781,7 +806,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   write_minimal_matroska_header (outfd, w, h, headers, headers_num, &seekh_off);
 
   timestamp_of_cluster = 0;
-  cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-45;
+  cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-48;
   write_cluster_header (outfd, timestamp_of_cluster);
   num_frames_within_cluster = 0;
   timestamp_within_cluster = 0;
@@ -852,7 +877,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 
 		  lseek (outfd, off, SEEK_SET);
 		  timestamp_of_cluster += timestamp_within_cluster;
-		  cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-45;
+		  cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-48;
 		  write_cluster_header (outfd, timestamp_of_cluster);
 		  num_frames_within_cluster = 0;
 		  timestamp_within_cluster = 0;
@@ -931,7 +956,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   write_int32_bigend (outfd, 0x10000000 | cluster_size);
 
   lseek (outfd, seekh_off+46, SEEK_SET);
-  write_int32_bigend (outfd, off-45);
+  write_int32_bigend (outfd, off-48);
 
   lseek (outfd, off, SEEK_SET);
   write_int32_bigend (outfd, 0x1c53bb6b);
@@ -973,6 +998,10 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   cues_size = lseek (outfd, 0, SEEK_CUR)-off-4;
   lseek (outfd, off, SEEK_SET);
   write_int32_bigend (outfd, 0x10000000 | cues_size);
+
+  off = lseek (outfd, 0, SEEK_END);
+  lseek (outfd, sizeof (ebml_header)+4, SEEK_SET);
+  write_int32_bigend (outfd, 0x10000000 | (off-sizeof (ebml_header)-8));
 
   exit (0);
 }
