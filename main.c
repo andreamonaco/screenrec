@@ -868,8 +868,13 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 	    {
 	      timestamp_within_cluster = num_frames_within_cluster*17;
 
-	      if (0x7fff < timestamp_within_cluster)
+	      if (0x7fff < timestamp_within_cluster
+		  || nal->i_type == NAL_SLICE_IDR)
 		{
+		  if (nal->i_type != NAL_SLICE_IDR)
+		    fprintf (stderr, "warning: closing a cluster before a new IDR "
+			     "was reached\n");
+
 		  off = lseek (outfd, 0, SEEK_CUR);
 
 		  lseek (outfd, -cluster_size-4, SEEK_CUR);
