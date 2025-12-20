@@ -899,7 +899,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 	}
       else if (outsz)
 	{
-	  if (outsz+4 > 1048575)
+	  if (outsz+4 > 268435455)
 	    fprintf (stderr, "skipping this frame because size (%d) is too "
 		     "big\n", outsz);
 	  else
@@ -952,9 +952,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 		}
 
 	      write_char (outfd, 0xa3);
-	      write_char (outfd, 0x20 | (((outsz+4) >> 16) & 0xff));
-	      write_char (outfd, ((outsz+4) >> 8) & 0xff);
-	      write_char (outfd, (outsz+4) & 0xff);
+	      write_int32_bigend (outfd, 0x10000000 | (outsz+4));
 
 	      /*fprintf (stderr, "timestamp = %d\n", timestamp_within_cluster);*/
 
@@ -977,7 +975,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 		  exit (1);
 		}
 
-	      cluster_size += outsz + 8;
+	      cluster_size += outsz + 9;
 	    }
 	}
 
