@@ -365,7 +365,7 @@ dump_tiledx4kb_pixels_linearly (char *buf, int w, int h, int p, enum pixel_forma
 
 
 int
-open_framebuffer (drmModeFB2 **fb2, int *cardfd)
+open_framebuffer (drmModeFB2 **fb2, int *cardfd, int *native_refresh)
 {
   drmDevice **devs;
   drmModeRes *res;
@@ -398,6 +398,16 @@ open_framebuffer (drmModeFB2 **fb2, int *cardfd)
       fprintf (stderr, "could not access crtc number 0\n");
       exit (1);
     }
+
+
+  if (native_refresh)
+    {
+      if (crtc->mode_valid)
+	*native_refresh = crtc->mode.vrefresh;
+      else
+	*native_refresh = -1;
+    }
+
 
   *fb2 = drmModeGetFB2 (*cardfd, crtc->buffer_id);
 
@@ -436,7 +446,7 @@ take_screenshot_and_exit (void)
   int dmabuf_fd, cardfd, pixel_format;
 
 
-  dmabuf_fd = open_framebuffer (&fb2, &cardfd);
+  dmabuf_fd = open_framebuffer (&fb2, &cardfd, NULL);
 
 
   pixel_format = fb2->pixel_format;
@@ -740,15 +750,26 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   off_t off, seekh_off;
   char *buf;
   unsigned char *out;
-  int i, w, h, outfd, dmabuf_fd, cardfd, num_frames_within_cluster, outsz, i_nal,
-    headers_num, timestamp_of_cluster, timestamp_within_cluster,
-    cluster_offset_within_segment, cluster_size, last_vblank = -1, cueind = 0,
-    cues_size;
+  int i, w, h, outfd, dmabuf_fd, cardfd, native_refresh, frame_duration,
+    num_frames_within_cluster, outsz, i_nal, headers_num, timestamp_of_cluster,
+    timestamp_within_cluster, cluster_offset_within_segment, cluster_size,
+    last_vblank = -1, cueind = 0, cues_size;
 
-  dmabuf_fd = open_framebuffer (&fb2, &cardfd);
+
+  dmabuf_fd = open_framebuffer (&fb2, &cardfd, &native_refresh);
 
   w = fb2->width;
   h = fb2->height;
+
+  if (native_refresh < 0)
+    {
+      fprintf (stderr, "warning: couldn't determine native refresh rate, "
+	       "assuming 60 hz\n");
+      native_refresh = 60;
+    }
+
+  frame_duration = (int) (1000.0/native_refresh+0.5);
+
 
   if (x264_param_default_preset (&par, preset, NULL) < 0)
     {
@@ -819,8 +840,8 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
       perror ("");
     }
 
-  write_minimal_matroska_header (outfd, w, h, 17*recording_interval, headers,
-				 headers_num, &seekh_off);
+  write_minimal_matroska_header (outfd, w, h, frame_duration*recording_interval,
+				 headers, headers_num, &seekh_off);
 
   timestamp_of_cluster = 0;
   cluster_offset_within_segment = lseek (outfd, 0, SEEK_CUR)-SEGMENT_BODY_START;
@@ -883,7 +904,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 		     "big\n", outsz);
 	  else
 	    {
-	      timestamp_within_cluster = num_frames_within_cluster*17;
+	      timestamp_within_cluster = num_frames_within_cluster*frame_duration;
 
 	      if (0x7fff < timestamp_within_cluster
 		  || nal->i_type == NAL_SLICE_IDR)
