@@ -21,12 +21,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <poll.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+
+#include <pthread.h>
+#include <semaphore.h>
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -735,6 +739,63 @@ write_cluster_header (int outfd, int timestamp)
 }
 
 
+struct
+thread_args
+{
+  int index;
+  int total;
+
+  unsigned char *out;
+  char *in;
+  int w, h, p;
+  enum pixel_format pf;
+};
+
+sem_t *may_start;
+sem_t has_finished;
+
+
+void *
+rearrange_rows (void *args)
+{
+  struct thread_args *arg = args;
+  int destind, srcind, x, y, striph = ceil ((double)arg->h/arg->total);
+
+
+  /*fprintf (stderr, "thread %d started, strips are %d high\n", arg->index, striph);*/
+
+  for (;;)
+    {
+      /*fprintf (stderr, "thread %d waiting for may_start semaphore\n", arg->index);*/
+      sem_wait (&may_start [arg->index]);
+      /*fprintf (stderr, "thread %d got may_start semaphore\n", arg->index);*/
+
+      destind = arg->index*striph*arg->w*3;
+
+      for (y = arg->index*striph; y < (arg->index+1)*striph && y < arg->h; y++)
+	{
+	  for (x = 0; x < arg->w; x++)
+	    {
+	      srcind = y/8*4096*(arg->p/512)+x/128*4096+(y%8)*512+(x%128)*4;
+
+	      arg->out [destind] = arg->in [srcind+2];
+	      arg->out [destind+1] = arg->in [srcind+1];
+	      arg->out [destind+2] = arg->in [srcind];
+
+	      destind += 3;
+	    }
+	}
+
+      /*fprintf (stderr, "thread %d posting has_finished semaphore\n", arg->index);*/
+      sem_post (&has_finished);
+    }
+
+  fprintf (stderr, "thread %d finished\n", arg->index);
+
+  return NULL;
+}
+
+
 void
 record_screen_and_exit (char *output, char *preset, int recording_interval)
 {
@@ -744,6 +805,8 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   x264_t *enc;
   drmModeFB2 *fb2;
   drmVBlank vbl = {{DRM_VBLANK_RELATIVE, 1}};
+  struct thread_args *args;
+  pthread_t *threads;
   struct cue_vector cue_vectors = {{{0}}}, *cuevec = &cue_vectors;
   struct stat statbuf;
   struct pollfd pfd = {0, POLLIN};
@@ -753,7 +816,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   int i, w, h, outfd, dmabuf_fd, cardfd, native_refresh, frame_duration,
     num_frames_within_cluster, outsz, i_nal, headers_num, timestamp_of_cluster,
     timestamp_within_cluster, cluster_offset_within_segment, cluster_size,
-    last_vblank = -1, cueind = 0, cues_size;
+    last_vblank = -1, cueind = 0, cues_size, nthreads;
 
 
   dmabuf_fd = open_framebuffer (&fb2, &cardfd, &native_refresh);
@@ -851,12 +914,37 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   cluster_size = 6;
 
   out = malloc_and_check (w*h*3);
+  inframe.img.plane [0] = out;
 
-  /*if (clock_gettime (CLOCK_REALTIME, &latest_ts) < 0)
+
+  nthreads = sysconf (_SC_NPROCESSORS_ONLN);
+
+  args = malloc_and_check (sizeof (*args) * nthreads);
+  may_start = malloc_and_check (sizeof (*may_start) * nthreads);
+  threads = malloc_and_check (sizeof (*threads) * nthreads);
+
+  for (i = 0; i < nthreads; i++)
     {
-      fprintf (stderr, "couldn't read system clock\n");
-      exit (1);
-      }*/
+      args [i].index = i;
+      args [i].total = nthreads;
+
+      args [i].out = out;
+      args [i].in = buf;
+      args [i].w = w;
+      args [i].h = h;
+      args [i].p = fb2->pitches [0];
+
+      sem_init (&may_start [i], 0, 0);
+
+      if (pthread_create (&threads [i], NULL, rearrange_rows, &args [i]))
+	{
+	  fprintf (stderr, "couldn't create thread\n");
+	  exit (1);
+	}
+    }
+
+  sem_init (&has_finished, 0, 0);
+
 
   for (;;)
     {
@@ -885,9 +973,27 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 
       vbl.request.sequence = vbl.reply.sequence+recording_interval;
 
-      convert_tiledx4kb_pixels_to_linear (out, buf, w, h, fb2->pitches [0], 0);
 
-      inframe.img.plane [0] = out;
+      /*fprintf (stderr, "posting may_start semaphores\n");*/
+
+      for (i = 0; i < nthreads; i++)
+	{
+	  sem_post (&may_start [i]);
+	}
+
+      /*fprintf (stderr, "waiting has_finished semaphore\n");*/
+
+      for (i = 0; i < nthreads; i++)
+	{
+	  sem_wait (&has_finished);
+	}
+
+      /*fprintf (stderr, "got has_finished semaphore\n");*/
+
+
+      /*convert_tiledx4kb_pixels_to_linear (out, buf, w, h, fb2->pitches [0], 0);*/
+
+
       inframe.i_pts = num_frames_within_cluster;
 
       outsz = x264_encoder_encode (enc, &nal, &i_nal, &inframe, &outframe);

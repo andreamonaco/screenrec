@@ -20,7 +20,7 @@
 
 CC = gcc
 CFLAGS = -I/usr/include/libdrm -Wall
-LIBS = -ldrm -lx264
+LIBS = -ldrm -lx264 -lm
 
 
 screenrec: main.o
