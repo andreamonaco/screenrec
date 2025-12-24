@@ -51,3 +51,26 @@ are easy to expand.
 You can run "screenrec -d" to dump info about your DRM setup so you can check
 those assumptions.  Look at the pixel_format and modifier fields and compare
 them against include/uapi/drm/drm_fourcc.h in the Linux source tree.
+
+
+
+__Does screenrec use the GPU in any way?__
+
+At present, it doesn't.  This matches my needs: my laptop has an old video card,
+so using hardware-accelerated encoding means choking the video card while
+paradoxically leaving the CPU under-used.
+If you have other needs or suggestions, write to me!
+
+
+
+__How can I reach the author?__
+
+You can write an email at monacoandrea + 94 + at + gmail + .com, where "+" is
+concatenation.
+
+
+
+__Can I donate something to the author?__
+
+Yes, I have Patreon (https://www.patreon.com/c/andreamonaco) and Liberapay
+(https://liberapay.com/andreamonaco).  Thanks for your support.
