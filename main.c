@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <time.h>
 #include <fcntl.h>
@@ -332,16 +333,16 @@ dump_linear_pixels (char *buf, int w, int h, int p, enum pixel_format pf)
 
 
 void
-convert_tiledx4kb_pixels_to_linear (unsigned char *out, char *in, int w, int h,
-				    int p, enum pixel_format pf)
+convert_tiledx4kb_pixels_to_linear (unsigned char *out, char *in, int x, int y,
+				    int w, int h, int p, enum pixel_format pf)
 {
-  int destind = 0, srcind, x, y;
+  int destind = 0, srcind, i, j;
 
-  for (y = 0; y < h; y++)
+  for (j = y; j < y+h; j++)
     {
-      for (x = 0; x < w; x++)
+      for (i = x; i < x+w; i++)
 	{
-	  srcind = y/8*4096*(p/512)+x/128*4096+(y%8)*512+(x%128)*4;
+	  srcind = j/8*4096*(p/512)+i/128*4096+(j%8)*512+(i%128)*4;
 
 	  out [destind] = in [srcind+2];
 	  out [destind+1] = in [srcind+1];
@@ -354,12 +355,13 @@ convert_tiledx4kb_pixels_to_linear (unsigned char *out, char *in, int w, int h,
 
 
 void
-dump_tiledx4kb_pixels_linearly (char *buf, int w, int h, int p, enum pixel_format pf)
+dump_tiledx4kb_pixels_linearly (char *buf, int x, int y, int w, int h, int p,
+				enum pixel_format pf)
 {
   int i;
   unsigned char *out = malloc_and_check (w*h*3);
 
-  convert_tiledx4kb_pixels_to_linear (out, buf, w, h, p, pf);
+  convert_tiledx4kb_pixels_to_linear (out, buf, x, y, w, h, p, pf);
 
   for (i = 0; i < w*h*3; i++)
     putchar (out [i]);
@@ -439,7 +441,7 @@ open_framebuffer (drmModeFB2 **fb2, int *cardfd, int *native_refresh)
 
 
 void
-take_screenshot_and_exit (void)
+take_screenshot_and_exit (int x, int y, int w, int h)
 {
   drmModeFB2 *fb2;
   struct stat statbuf;
@@ -451,6 +453,16 @@ take_screenshot_and_exit (void)
 
 
   dmabuf_fd = open_framebuffer (&fb2, &cardfd, NULL);
+
+
+  w = w < 0 ? fb2->width-x : w;
+  h = h < 0 ? fb2->height-y : h;
+
+  if (w <= 0 || h <= 0 || x+w > fb2->width || y+h > fb2->height)
+    {
+      fprintf (stderr, "out-of-bound geometry in -g option\n");
+      exit (1);
+    }
 
 
   pixel_format = fb2->pixel_format;
@@ -492,7 +504,7 @@ take_screenshot_and_exit (void)
     }
 
 
-  printf ("P6\n%d\n%d\n255\n", fb2->width, fb2->height);
+  printf ("P6\n%d\n%d\n255\n", w, h);
 
   switch (po)
     {
@@ -500,8 +512,7 @@ take_screenshot_and_exit (void)
       dump_linear_pixels (buf, fb2->width, fb2->height, fb2->pitches [0], pf);
       break;
     case TILEDX_4KB:
-      dump_tiledx4kb_pixels_linearly (buf, fb2->width, fb2->height,
-				      fb2->pitches [0], pf);
+      dump_tiledx4kb_pixels_linearly (buf, x, y, w, h, fb2->pitches [0], pf);
       break;
     }
 
@@ -747,7 +758,7 @@ thread_args
 
   unsigned char *out;
   char *in;
-  int w, h, p;
+  int x, y, w, h, p;
   enum pixel_format pf;
 };
 
@@ -759,7 +770,7 @@ void *
 rearrange_rows (void *args)
 {
   struct thread_args *arg = args;
-  int destind, srcind, x, y, striph = ceil ((double)arg->h/arg->total);
+  int destind, srcind, i, j, striph = ceil ((double)arg->h/arg->total);
 
 
   /*fprintf (stderr, "thread %d started, strips are %d high\n", arg->index, striph);*/
@@ -772,11 +783,12 @@ rearrange_rows (void *args)
 
       destind = arg->index*striph*arg->w*3;
 
-      for (y = arg->index*striph; y < (arg->index+1)*striph && y < arg->h; y++)
+      for (j = arg->y+arg->index*striph; j < arg->y+(arg->index+1)*striph
+	     && j < arg->y+arg->h; j++)
 	{
-	  for (x = 0; x < arg->w; x++)
+	  for (i = arg->x; i < arg->x+arg->w; i++)
 	    {
-	      srcind = y/8*4096*(arg->p/512)+x/128*4096+(y%8)*512+(x%128)*4;
+	      srcind = j/8*4096*(arg->p/512)+i/128*4096+(j%8)*512+(i%128)*4;
 
 	      arg->out [destind] = arg->in [srcind+2];
 	      arg->out [destind+1] = arg->in [srcind+1];
@@ -797,7 +809,8 @@ rearrange_rows (void *args)
 
 
 void
-record_screen_and_exit (char *output, char *preset, int recording_interval)
+record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
+			int recording_interval)
 {
   x264_param_t par;
   x264_picture_t inframe, outframe;
@@ -813,7 +826,7 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
   off_t off, seekh_off;
   char *buf;
   unsigned char *out;
-  int i, w, h, outfd, dmabuf_fd, cardfd, native_refresh, frame_duration,
+  int i, outfd, dmabuf_fd, cardfd, native_refresh, frame_duration,
     num_frames_within_cluster, outsz, i_nal, headers_num, timestamp_of_cluster,
     timestamp_within_cluster, cluster_offset_within_segment, cluster_size,
     last_vblank = -1, cueind = 0, cues_size, nthreads;
@@ -821,8 +834,16 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 
   dmabuf_fd = open_framebuffer (&fb2, &cardfd, &native_refresh);
 
-  w = fb2->width;
-  h = fb2->height;
+
+  w = w < 0 ? fb2->width-x : w;
+  h = h < 0 ? fb2->height-y : h;
+
+  if (w <= 0 || h <= 0 || x+w > fb2->width || y+h > fb2->height)
+    {
+      fprintf (stderr, "out-of-bound geometry in -g option\n");
+      exit (1);
+    }
+
 
   if (native_refresh < 0)
     {
@@ -930,6 +951,8 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 
       args [i].out = out;
       args [i].in = buf;
+      args [i].x = x;
+      args [i].y = y;
       args [i].w = w;
       args [i].h = h;
       args [i].p = fb2->pitches [0];
@@ -1060,6 +1083,8 @@ record_screen_and_exit (char *output, char *preset, int recording_interval)
 	      write_char (outfd, 0xa3);
 	      write_int32_bigend (outfd, 0x10000000 | (outsz+4));
 
+	      /*fprintf (stderr, "timestamp = %ld %ld\n", vbl.reply.tval_sec,
+		vbl.reply.tval_usec);*/
 	      /*fprintf (stderr, "timestamp = %d\n", timestamp_within_cluster);*/
 
 	      write_char (outfd, 0x81);
@@ -1159,17 +1184,20 @@ void
 print_help_and_exit (void)
 {
   printf ("options:\n"
-	  "\t--record-screen or -r:     record screen and print the binary data "
+	  "\t--record-screen or -r:      record screen and print the binary data "
 	  "to stdout in MKV format\n"
-	  "\t--preset or -p PRESET:     select a preset when recording screen, "
+	  "\t--preset or -p PRESET:      select a preset when recording screen, "
 	  "default is medium\n"
-	  "\t--record-every-th or -y N  record one frame every N, defaults to one "
+	  "\t--geometry or -g X,Y[,WxH]: select a portion of the screen to record "
+	  "or screenshot, starting from (X,Y) and spanning WxH pixels, "
+	  "for example 10,20,40x40\n"
+	  "\t--record-every-th or -y N   record one frame every N, defaults to one "
 	  "for recording at native refresh rate\n"
-	  "\t--output or -o FILE:       output file, required for recording\n"
-	  "\t--take-screenshot or -s:   take a screenshot and print "
+	  "\t--output or -o FILE:        output file, required for recording\n"
+	  "\t--take-screenshot or -s:    take a screenshot and print "
 	  "the data to stdout in binary PPM format\n"
-	  "\t--dump-info or -d:         dump info about your DRM setup\n"
-	  "\t--help or -h:              print this help and exit\n");
+	  "\t--dump-info or -d:          dump info about your DRM setup\n"
+	  "\t--help or -h:               print this help and exit\n");
   exit (0);
 }
 
@@ -1178,8 +1206,8 @@ int
 main (int argc, char *argv [])
 {
   enum action act = DUMP_INFO;
-  char *preset = "medium", *output = NULL;
-  int i, need_arg = 0, record_interv = 1;
+  char *preset = "medium", *geometry = NULL, *output = NULL;
+  int i, need_arg = 0, record_interv = 1, x = -1, y = -1, w = -1, h = -1;
 
 
   for (i = 1; i < argc; i++)
@@ -1190,6 +1218,9 @@ main (int argc, char *argv [])
 	    {
 	    case 'p':
 	      preset = argv [i];
+	      break;
+	    case 'g':
+	      geometry = argv [i];
 	      break;
 	    case 'y':
 	      if (strlen (argv [i]) != 1 || *argv [i] < '1' || *argv [i] > '9')
@@ -1212,6 +1243,8 @@ main (int argc, char *argv [])
 	act = RECORD;
       else if (!strcmp (argv [i], "--preset") || !strcmp (argv [i], "-p"))
 	need_arg = 'p';
+      else if (!strcmp (argv [i], "--geometry") || !strcmp (argv [i], "-g"))
+	need_arg = 'g';
       else if (!strcmp (argv [i], "--record-every-th") || !strcmp (argv [i], "-y"))
 	need_arg = 'y';
       else if (!strcmp (argv [i], "--output") || !strcmp (argv [i], "-o"))
@@ -1238,11 +1271,73 @@ main (int argc, char *argv [])
       print_help_and_exit ();
     }
 
+  if (act == SCREENSHOT || act == RECORD)
+    {
+      if (geometry)
+	{
+	  while (*geometry)
+	    {
+	      if (isdigit (*geometry))
+		{
+		  if (x == -1)
+		    x = *geometry-'0';
+		  else if (y == -1)
+		    x = x*10+*geometry-'0';
+		  else if (w == -1)
+		    y = y*10+*geometry-'0';
+		  else if (h == -1)
+		    w = w*10+*geometry-'0';
+		  else
+		    h = h*10+*geometry-'0';
+		}
+	      else if (*geometry == ',')
+		{
+		  if (x == -1)
+		    {
+		      fprintf (stderr, "wrong syntax for -g option\n");
+		      print_help_and_exit ();
+		    }
+		  else if (y == -1)
+		    y = 0;
+		  else if (w == -1)
+		    w = 0;
+		  else
+		    {
+		      fprintf (stderr, "wrong syntax for -g option\n");
+		      print_help_and_exit ();
+		    }
+		}
+	      else if (*geometry == 'x' || *geometry == 'X')
+		{
+		  if (w == -1 || h != -1)
+		    {
+		      fprintf (stderr, "wrong syntax for -g option\n");
+		      print_help_and_exit ();
+		    }
+
+		  h = 0;
+		}
+	      else
+		{
+		  fprintf (stderr, "wrong syntax for -g option\n");
+		  print_help_and_exit ();
+		}
+
+	      geometry++;
+	    }
+	}
+
+      x = x < 0 ? 0 : x;
+      y = y < 0 ? 0 : y;
+    }
+
+  /*fprintf (stderr, "x = %d y = %d w = %d h = %d\n", x, y, w, h);*/
+
   if (act == DUMP_INFO)
     dump_drm_info_and_exit ();
 
   if (act == SCREENSHOT)
-    take_screenshot_and_exit ();
+    take_screenshot_and_exit (x, y, w, h);
 
   if (act == RECORD)
     {
@@ -1253,7 +1348,7 @@ main (int argc, char *argv [])
 	  print_help_and_exit ();
 	}
 
-      record_screen_and_exit (output, preset, record_interv);
+      record_screen_and_exit (output, preset, x, y, w, h, record_interv);
     }
 
   return 0;
