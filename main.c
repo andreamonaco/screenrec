@@ -71,7 +71,7 @@ action
 struct
 cue
 {
-  int timestamp;
+  long timestamp;
   int cluster_position;
   int relative_position;
 };
@@ -543,6 +543,14 @@ write_int32_bigend (int fd, int num)
 }
 
 
+void
+write_int64_bigend (int fd, long num)
+{
+  write_int32_bigend (fd, (num & 0xffffffff00000000) >> 32);
+  write_int32_bigend (fd, num);
+}
+
+
 const unsigned char ebml_header [] =
   {0x1a, 0x45, 0xdf, 0xa3, 0xa3,
    0x42, 0x86, 0x81, 0x01,
@@ -594,7 +602,7 @@ write_minimal_matroska_header (int outfd, int width, int height,
        0x53, 0xac, 0x84, 0x00, 0x00, 0x00, 0x00, /* seek position of cues */
 
        0x15, 0x49, 0xa9, 0x66, 0x9f, /* info header */
-       0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40, /* timestamp scale */
+       0x2a, 0xd7, 0xb1, 0x83, 0x00, 0x00, 0x01, /* timestamp scale */
        0x4d, 0x80, 0x89, 's', 'c', 'r', 'e', 'e', 'n', 'r', 'e', 'c', /* muxing app */
        0x57, 0x41, 0x89, 's', 'c', 'r', 'e', 'e', 'n', 'r', 'e', 'c', /* writing app */
   };
@@ -675,7 +683,7 @@ write_minimal_matroska_header (int outfd, int width, int height,
     = 0x80 | avcrec_sz;
 
 
-  default_duration *= 1000000;
+  default_duration *= 1;
 
   header [sizeof (ebml_header)+sizeof (segment_header)+21]
     = (default_duration & 0xff000000) >> 24;
@@ -734,19 +742,19 @@ write_minimal_matroska_header (int outfd, int width, int height,
 
 
 void
-write_cluster_header (int outfd, int timestamp)
+write_cluster_header (int outfd, long timestamp)
 {
   int i;
   unsigned char cluster_header [] =
     {0x1f, 0x43, 0xb6, 0x75, 0xff, 0xff, 0xff, 0xff, /* cluster header */
-     0xe7, 0x84 /* timestamp */ };
+     0xe7, 0x88 /* timestamp */ };
 
   for (i = 0; i < sizeof (cluster_header); i++)
     {
       write_char (outfd, cluster_header [i]);
     }
 
-  write_int32_bigend (outfd, timestamp);
+  write_int64_bigend (outfd, timestamp);
 }
 
 
@@ -826,8 +834,9 @@ record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
   off_t off, seekh_off;
   char *buf;
   unsigned char *out;
+  long timestamp_of_cluster;
   int i, outfd, dmabuf_fd, cardfd, native_refresh, frame_duration,
-    num_frames_within_cluster, outsz, i_nal, headers_num, timestamp_of_cluster,
+    num_frames_within_cluster, outsz, i_nal, headers_num,
     timestamp_within_cluster, cluster_offset_within_segment, cluster_size,
     last_vblank = -1, cueind = 0, cues_size, nthreads;
 
@@ -852,7 +861,7 @@ record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
       native_refresh = 60;
     }
 
-  frame_duration = (int) (1000.0/native_refresh+0.5);
+  frame_duration = (int) (1000000000.0/native_refresh+0.5);
 
 
   if (x264_param_default_preset (&par, preset, NULL) < 0)
@@ -932,7 +941,7 @@ record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
   write_cluster_header (outfd, timestamp_of_cluster);
   num_frames_within_cluster = 0;
   timestamp_within_cluster = 0;
-  cluster_size = 6;
+  cluster_size = 10;
 
   out = malloc_and_check (w*h*3);
   inframe.img.plane [0] = out;
@@ -1038,9 +1047,9 @@ record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
 	      if (0x7fff < timestamp_within_cluster
 		  || nal->i_type == NAL_SLICE_IDR)
 		{
-		  if (nal->i_type != NAL_SLICE_IDR)
+		  /*if (nal->i_type != NAL_SLICE_IDR)
 		    fprintf (stderr, "warning: closing a cluster before a new IDR "
-			     "was reached\n");
+		    "was reached\n");*/
 
 		  off = lseek (outfd, 0, SEEK_CUR);
 
@@ -1054,7 +1063,7 @@ record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
 		  write_cluster_header (outfd, timestamp_of_cluster);
 		  num_frames_within_cluster = 0;
 		  timestamp_within_cluster = 0;
-		  cluster_size = 6;
+		  cluster_size = 10;
 		}
 
 	      /*printf ("nal type is %d\n", nal->i_type);*/
@@ -1143,11 +1152,11 @@ record_screen_and_exit (char *output, char *preset, int x, int y, int w, int h,
       for (i = 0; i < (cuevec->next ? CUE_VECTOR_SIZE : cueind); i++)
 	{
 	  write_char (outfd, 0xbb); /* cue point */
-	  write_char (outfd, 0x97);
+	  write_char (outfd, 0x9b);
 
 	  write_char (outfd, 0xb3); /* cue time */
-	  write_char (outfd, 0x84);
-	  write_int32_bigend (outfd, cuevec->cues [i].timestamp);
+	  write_char (outfd, 0x88);
+	  write_int64_bigend (outfd, cuevec->cues [i].timestamp);
 
 	  write_char (outfd, 0xb7); /* cue track positions */
 	  write_char (outfd, 0x8f);
